@@ -116,6 +116,9 @@ public:
 	[[nodiscard]] rpl::producer<> messageShotSelectionRequest() const {
 		return _messageShotSelection.events();
 	}
+	[[nodiscard]] rpl::producer<> forwardWithoutSourceSelectionRequest() const {
+		return _forwardWithoutSourceSelection.events();
+	}
 	[[nodiscard]] rpl::producer<> clearSelectionRequest() const {
 		return _clearSelection.events();
 	}
@@ -285,6 +288,7 @@ private:
 	base::Timer _onlineUpdater;
 
 	rpl::event_stream<> _forwardSelection;
+	rpl::event_stream<> _forwardWithoutSourceSelection;
 	rpl::event_stream<> _sendNowSelection;
 	rpl::event_stream<> _deleteSelection;
 	rpl::event_stream<> _messageShotSelection;
