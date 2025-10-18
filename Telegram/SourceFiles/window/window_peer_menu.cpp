@@ -3102,6 +3102,9 @@ base::weak_qptr<Ui::BoxContent> ShowForwardMessagesBox(
 		boxRaw->setForwardOptions({
 			.sendersCount = sendersCount,
 			.captionsCount = captionsCount,
+			.dropNames = (draft.options == Data::ForwardOptions::NoSenderNames
+				|| draft.options == Data::ForwardOptions::NoNamesAndCaptions),
+			.dropCaptions = (draft.options == Data::ForwardOptions::NoNamesAndCaptions),
 		});
 		show->showBox(std::move(box));
 		auto state = State{ boxRaw, controllerRaw };
