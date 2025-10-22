@@ -43,10 +43,13 @@ jobs:
 
   build-libraries:
     name: Build Libraries
-    runs-on: windows-latest
+    runs-on: windows-2022
+
+    env:
+      TBUILD: ${{ github.workspace }}\TBuild
+      REPO_NAME: ${{ github.event.repository.name }}
 
     outputs:
-      cache-hit: ${{ steps.check-cache.outputs.cache-hit }}
       cache-key: ${{ env.CACHE_KEY }}
 
     defaults:
@@ -57,83 +60,112 @@ jobs:
       - name: Prepare directories
         run: |
           mkdir %userprofile%\TBuild\Libraries
-          mklink /d %GITHUB_WORKSPACE%\TBuild %userprofile%\TBuild
-          echo TBUILD=%GITHUB_WORKSPACE%\TBuild>>%GITHUB_ENV%
-          echo REPO_NAME=${{ github.event.repository.name }}>>%GITHUB_ENV%
-
-      - name: Setup MSVC
-        uses: ilammy/msvc-dev-cmd@v1.13.0
-        with:
-          arch: x64
+          mklink /d %TBUILD% %userprofile%\TBuild
 
       - name: Clone
         uses: actions/checkout@v4
         with:
-          submodules: recursive
           path: ${{ env.TBUILD }}\${{ env.REPO_NAME }}
+          sparse-checkout: Telegram/build
 
       - name: Calculate cache key
         shell: bash
         run: |
-          echo "$(sha256sum $TBUILD/$REPO_NAME/Telegram/build/prepare/prepare.py | awk '{ print $1 }')" >> CACHE_KEY.txt
-          echo "$(find $TBUILD/$REPO_NAME/Telegram/ThirdParty -name "*.cmake" -o -name "*.py" | sort | xargs sha256sum | sha256sum | awk '{ print $1 }')" >> CACHE_KEY.txt
-          echo "x64" >> CACHE_KEY.txt
-          echo "CACHE_KEY=$(sha256sum CACHE_KEY.txt | awk '{ print $1 }')" >> $GITHUB_ENV
+          cd "$TBUILD/$REPO_NAME"
+          sha256sum \
+            Telegram/build/prepare/prepare.py \
+            Telegram/build/prepare/win.bat \
+            Telegram/build/qt_version.py > "$RUNNER_TEMP/libraries-cache-key.txt"
+          echo "x64" >> "$RUNNER_TEMP/libraries-cache-key.txt"
+          CACHE_KEY=$(sha256sum --zero "$RUNNER_TEMP/libraries-cache-key.txt" | awk '{ print $1 }')
+          echo "CACHE_KEY=$CACHE_KEY" >> "$GITHUB_ENV"
 
-      - name: Check if exact cache exists
-        id: check-cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.TBUILD }}\Libraries
-          key: ${{ runner.OS }}-x64-libs-${{ env.CACHE_KEY }}
-          lookup-only: true
-
-      - name: NuGet sources
-        if: steps.check-cache.outputs.cache-hit != 'true'
-        run: |
-          nuget sources Disable -Name "Microsoft Visual Studio Offline Packages"
-          nuget sources Add -Source https://api.nuget.org/v3/index.json & exit 0
-
-      - name: Restore partial cache
-        if: steps.check-cache.outputs.cache-hit != 'true'
-        id: restore-cache
+      - name: Restore Libraries cache
+        id: libraries-cache
         uses: actions/cache/restore@v4
         with:
-          path: ${{ env.TBUILD }}\Libraries
+          path: ~/TBuild/Libraries
           key: ${{ runner.OS }}-x64-libs-${{ env.CACHE_KEY }}
           restore-keys: ${{ runner.OS }}-x64-libs-
 
+      - name: Setup MSVC
+        if: steps.libraries-cache.outputs.cache-hit != 'true'
+        uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: x64
+
       - name: Build Libraries
-        if: steps.check-cache.outputs.cache-hit != 'true'
+        if: steps.libraries-cache.outputs.cache-hit != 'true'
         env:
           GYP_MSVS_OVERRIDE_PATH: 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\'
           GYP_MSVS_VERSION: 2022
         run: |
+          nuget sources Disable -Name "Microsoft Visual Studio Offline Packages"
+          nuget sources Add -Source https://api.nuget.org/v3/index.json
           cd %TBUILD%
           %REPO_NAME%\Telegram\build\prepare\win.bat silent
 
       - name: Clean temporary files
-        if: steps.check-cache.outputs.cache-hit != 'true'
+        if: steps.libraries-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        shell: powershell
         run: |
-          cd %TBUILD%
-          del /S Libraries\*.pdb
-          del /S Libraries\*.pch
-          del /S Libraries\*.obj
+          $root = [IO.Path]::GetFullPath("$env:USERPROFILE\TBuild\Libraries")
+          $gitDirectories = @(Get-ChildItem -LiteralPath $root -Recurse -Force -Directory |
+            Where-Object { $_.Name -eq '.git' })
+          $gitDirectories |
+            Sort-Object { $_.FullName.Length } -Descending |
+            Remove-Item -Recurse -Force
+          Get-ChildItem -LiteralPath $root -Recurse -Force -File |
+            Where-Object { $_.Name -eq '.git' -or $_.Extension -in '.pdb', '.pch', '.obj', '.ilk' } |
+            Remove-Item -Force
+          $win64 = Join-Path $root 'win64'
+          Get-ChildItem -LiteralPath (Join-Path $win64 'cache_keys') -Force -File |
+            Where-Object { $_.Name -like 'qt_*' } |
+            ForEach-Object {
+              $version = $_.Name.Substring(3)
+              $buildPath = Join-Path $win64 $_.Name
+              $installPath = Join-Path $win64 "Qt-$version"
+              if ((Test-Path -LiteralPath $buildPath -PathType Container) -and
+                  (Test-Path -LiteralPath $installPath -PathType Container)) {
+                Get-ChildItem -LiteralPath $buildPath -Force |
+                  Remove-Item -Recurse -Force
+                New-Item -ItemType File -Path (Join-Path $buildPath '.cache-stage') -Force |
+                  Out-Null
+              }
+            }
+          $configurationDirectories = @(Get-ChildItem -LiteralPath $root -Recurse -Force -Directory |
+            Where-Object {
+              (($_.Name -in 'Debug', 'MinSizeRel') -and
+                ((Test-Path -LiteralPath (Join-Path $_.Parent.FullName 'Release') -PathType Container) -or
+                 (Test-Path -LiteralPath (Join-Path $_.Parent.FullName 'RelWithDebInfo') -PathType Container))) -or
+              (($_.Name -eq 'builddir-debug') -and
+                (Test-Path -LiteralPath (Join-Path $_.Parent.FullName 'builddir-release') -PathType Container)) -or
+              (($_.Name -eq 'out.dbg') -and
+                (Test-Path -LiteralPath (Join-Path $_.Parent.FullName 'out') -PathType Container))
+            })
+          $configurationDirectories |
+            Sort-Object { $_.FullName.Length } -Descending |
+            Remove-Item -Recurse -Force
 
       - name: Save Libraries cache
-        if: steps.check-cache.outputs.cache-hit != 'true'
+        if: steps.libraries-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          path: ${{ env.TBUILD }}\Libraries
+          path: ~/TBuild/Libraries
           key: ${{ runner.OS }}-x64-libs-${{ env.CACHE_KEY }}
 
   build-desktop:
     name: Build Desktop
     needs: build-libraries
-    runs-on: windows-latest
+    runs-on: windows-2022
 
     env:
-      UPLOAD_ARTIFACT: "true"
+      TBUILD: ${{ github.workspace }}\TBuild
+      REPO_NAME: ${{ github.event.repository.name }}
+      BUILD_PARALLEL_JOBS: "2"
+      TDESKTOP_BUILD_ARCH: x64
+      TDESKTOP_BUILD_API: ${{ github.ref == 'refs/heads/nightly' && '-D TDESKTOP_API_ID=611335 -D TDESKTOP_API_HASH=d524b414d21f4d37f08684c1df41ac9c' || '-D TDESKTOP_API_TEST=ON' }}
 
     defaults:
       run:
@@ -143,9 +175,7 @@ jobs:
       - name: Prepare directories
         run: |
           mkdir %userprofile%\TBuild\Libraries
-          mklink /d %GITHUB_WORKSPACE%\TBuild %userprofile%\TBuild
-          echo TBUILD=%GITHUB_WORKSPACE%\TBuild>>%GITHUB_ENV%
-          echo REPO_NAME=${{ github.event.repository.name }}>>%GITHUB_ENV%
+          mklink /d %TBUILD% %userprofile%\TBuild
 
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1.13.0
@@ -161,56 +191,133 @@ jobs:
       - name: Restore Libraries cache
         uses: actions/cache/restore@v4
         with:
-          path: ${{ env.TBUILD }}\Libraries
+          path: ~/TBuild/Libraries
           key: ${{ runner.OS }}-x64-libs-${{ needs.build-libraries.outputs.cache-key }}
           restore-keys: ${{ runner.OS }}-x64-libs-
           fail-on-cache-miss: true
 
-      - name: Setup environment
+      - name: Restore Desktop cache
+        id: desktop-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ env.TBUILD }}\${{ env.REPO_NAME }}\out
+            !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\Release\**
+            !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\**\*.lib
+            !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\**\*.exe
+            !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\**\*.dll
+            !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\**\*.pdb
+            !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\**\*.ilk
+            !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\**\*.exp
+          key: ${{ runner.OS }}-x64-desktop-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: ${{ runner.OS }}-x64-desktop-
+
+      - name: Restore Desktop cache timestamps
+        if: steps.desktop-cache.outputs.cache-matched-key != ''
+        shell: powershell
+        run: |
+          cd "$env:TBUILD\$env:REPO_NAME"
+          $matchedKey = '${{ steps.desktop-cache.outputs.cache-matched-key }}'
+          if ($matchedKey -notmatch '-desktop-([0-9a-f]{40})-\d+-\d+$') {
+            throw "Unexpected desktop cache key: $matchedKey"
+          }
+          $cacheCommit = $Matches[1]
+          git fetch --no-tags --depth=1 origin $cacheCommit
+          if ($LASTEXITCODE) {
+            throw "Could not fetch desktop cache commit $cacheCommit"
+          }
+          $root = (Get-Location).Path
+          $baseline = [DateTime]::new(2000, 1, 1, 0, 0, 0, [DateTimeKind]::Utc)
+          git -c core.quotepath=false ls-files --recurse-submodules | ForEach-Object {
+            $path = Join-Path $root $_
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+              [IO.File]::SetLastWriteTimeUtc($path, $baseline)
+            }
+          }
+          $changed = @(git -c core.quotepath=false diff --name-only $cacheCommit HEAD)
+          if ($LASTEXITCODE) {
+            throw "Could not compare desktop cache commit $cacheCommit"
+          }
+          $current = [DateTime]::UtcNow
+          $changed | ForEach-Object {
+            $path = Join-Path $root $_
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+              [IO.File]::SetLastWriteTimeUtc($path, $current)
+            } elseif (Test-Path -LiteralPath $path -PathType Container) {
+              git -c core.quotepath=false -C $path ls-files --recurse-submodules | ForEach-Object {
+                [IO.File]::SetLastWriteTimeUtc((Join-Path $path $_), $current)
+              }
+            }
+          }
+          if ($changed -contains 'patches/smooth_scroll.patch') {
+            git -c core.quotepath=false -C Telegram/lib_ui diff --name-only | ForEach-Object {
+              [IO.File]::SetLastWriteTimeUtc(
+                (Join-Path "$root\Telegram\lib_ui" $_),
+                $current)
+            }
+          }
+
+      - name: Build Desktop
+        id: build
         env:
           GYP_MSVS_OVERRIDE_PATH: 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\'
           GYP_MSVS_VERSION: 2022
         run: |
           cd %TBUILD%
-          %REPO_NAME%\Telegram\build\prepare\win.bat silent
-
-      - name: Configure build
-        shell: bash
-        run: |
-          echo "TDESKTOP_BUILD_ARCH=x64" >> $GITHUB_ENV
-          echo "ARTIFACT_NAME=Telegram_x64" >> $GITHUB_ENV
-
-          API="-D TDESKTOP_API_TEST=ON"
-          if [ $GITHUB_REF == 'refs/heads/nightly' ]; then
-            API="-D TDESKTOP_API_ID=611335 -D TDESKTOP_API_HASH=d524b414d21f4d37f08684c1df41ac9c"
-          fi
-          echo "TDESKTOP_BUILD_API=$API" >> $GITHUB_ENV
-
-      - name: Build Desktop
-        run: |
+          call %REPO_NAME%\Telegram\build\prepare\win.bat silent
           cd %TBUILD%\%REPO_NAME%\Telegram
 
           call configure.bat ^
           %TDESKTOP_BUILD_ARCH% ^
           %TDESKTOP_BUILD_API% ^
-          -D CMAKE_C_FLAGS="/WX" ^
-          -D CMAKE_CXX_FLAGS="/WX" ^
+          -D CMAKE_C_FLAGS="/WX /O2 /Gw /Zc:inline /Oy /Gy /cgthreads2 /DNDEBUG" ^
+          -D CMAKE_CXX_FLAGS="/WX /O2 /Gw /Zc:inline /Oy /Gy /cgthreads2 /DNDEBUG" ^
+          -D CMAKE_EXE_LINKER_FLAGS="/OPT:REF /OPT:ICF=10 /DEBUG:NONE" ^
+          -D CMAKE_BUILD_TYPE=Release ^
           -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON ^
           -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON ^
-          -D DESKTOP_APP_NO_PDB=ON
+          -D DESKTOP_APP_ENABLE_LTO=OFF ^
+          -D "CMAKE_MSVC_DEBUG_INFORMATION_FORMAT="
 
-          cmake --build ..\out --config Release --parallel
-
-      - name: Move artifacts
-        if: (env.UPLOAD_ARTIFACT == 'true') || (github.ref == 'refs/heads/nightly')
-        run: |
-          set OUT=%TBUILD%\%REPO_NAME%\out\Release
-          mkdir artifact
-          move %OUT%\AyuGram.exe artifact/
+          cmake --build ..\out --config Release --target Telegram --parallel %BUILD_PARALLEL_JOBS% || ^
+          cmake --build ..\out --config Release --target Telegram --parallel 1
 
       - name: Upload artifacts
-        if: (env.UPLOAD_ARTIFACT == 'true') || (github.ref == 'refs/heads/nightly')
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ARTIFACT_NAME }}
-          path: artifact\
+          name: Telegram_x64
+          path: ${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\Release\AyuGram.exe
+          if-no-files-found: error
+
+      - name: Save Desktop cache
+        if: ${{ !cancelled() && steps.build.outcome != 'skipped' }}
+        uses: actions/cache/save@v4
+        env:
+          ZSTD_CLEVEL: "1"
+        with:
+          path: |
+            ${{ env.TBUILD }}\${{ env.REPO_NAME }}\out
+            !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\Release\**
+            !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\**\*.lib
+            !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\**\*.exe
+            !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\**\*.dll
+            !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\**\*.pdb
+            !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\**\*.ilk
+            !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\**\*.exp
+          key: ${{ runner.OS }}-x64-desktop-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+  prune-old-actions:
+    name: Prune Old Actions
+    needs: build-desktop
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+
+    steps:
+      - uses: yanovian/prune-old-actions@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          days-ago: 30
+          keep-latest: 5
