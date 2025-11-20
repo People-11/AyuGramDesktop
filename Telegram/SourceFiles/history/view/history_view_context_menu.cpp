@@ -917,8 +917,12 @@ bool AddViewRepliesAction(
 		: 0;
 	const auto repliesCount = item->repliesCount();
 	const auto withReplies = (repliesCount > 0);
+	const auto isReplyToPost = !withReplies
+		&& item->replyToTop()
+		&& item->history()->peer->isMegagroup();
+
 	if (!withReplies || !item->history()->peer->isMegagroup()) {
-		if (!topicRootId) {
+		if (!topicRootId && !isReplyToPost) {
 			return false;
 		}
 	}
@@ -1332,16 +1336,6 @@ bool AddSelectMessageAction(
 	}
 	const auto owner = &item->history()->owner();
 	const auto itemId = item->fullId();
-	const auto asGroup = (request.pointState != PointState::GroupPart);
-	menu->addAction(tr::lng_context_select_msg(tr::now), [=] {
-		if (const auto item = owner->message(itemId)) {
-			if (asGroup) {
-				list->selectItemAsGroup(item);
-			} else {
-				list->selectItem(item);
-			}
-		}
-	}, &st::menuIconSelect);
 	if (!request.selectedItems.empty() && list->canSelectItemsUpTo(item)) {
 		menu->addAction(tr::lng_context_select_msg_bulk(tr::now), [=] {
 			if (const auto item = owner->message(itemId)) {

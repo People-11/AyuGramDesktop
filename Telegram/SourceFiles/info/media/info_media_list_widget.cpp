@@ -1700,22 +1700,6 @@ void ListWidget::showContextMenu(
 						}
 					}),
 					&st::menuIconSelect);
-			} else {
-				_contextMenu->addAction(
-					tr::lng_context_select_msg(tr::now),
-					crl::guard(this, [=] {
-						if (hasSelectedText()) {
-							clearSelected();
-						} else if (_selected.size() == _selectedLimit) {
-							return;
-						} else if (_selected.empty()) {
-							update();
-						}
-						applyItemSelection(
-							MessageByGlobalId(globalId),
-							FullSelection);
-					}),
-					&st::menuIconSelect);
 			}
 		}
 	}

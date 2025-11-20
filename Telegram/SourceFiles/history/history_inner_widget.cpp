@@ -3063,8 +3063,13 @@ void HistoryInner::showContextMenu(QContextMenuEvent *e, bool showFromTouch) {
 		const auto topicRootId = item->history()->isForum()
 			? item->topicRootId()
 			: 0;
+		const auto isReplyToPost = !withReplies
+			&& item->replyToTop()
+			&& item->history()->peer->isMegagroup();
+
 		if (topicRootId
-			|| (withReplies && item->history()->peer->isMegagroup())) {
+			|| (withReplies && item->history()->peer->isMegagroup())
+			|| isReplyToPost) {
 			const auto highlightId = topicRootId ? item->id : 0;
 			const auto rootId = topicRootId
 				? topicRootId
@@ -3267,25 +3272,6 @@ void HistoryInner::showContextMenu(QContextMenuEvent *e, bool showFromTouch) {
 		) != HistoryView::PointState::GroupPart);
 	const auto addSelectMessageAction = [&](not_null<HistoryItem*> item) {
 		if (item->canBeSelected() && !hasSelectRestriction()) {
-			const auto itemId = item->fullId();
-			_menu->addAction(tr::lng_context_select_msg(tr::now), [=] {
-				if (const auto item = session->data().message(itemId)) {
-					if ([[maybe_unused]] const auto view = viewByItem(item)) {
-						clearTextSelection();
-						if (asGroup) {
-							changeSelectionAsGroup(
-								&_selected,
-								item,
-								SelectAction::Select);
-						} else {
-							changeSelection(&_selected, item, SelectAction::Select);
-						}
-						_accessibilitySelectionAnchor = nullptr;
-						repaintItem(item);
-						_widget->updateTopBarSelection();
-					}
-				}
-			}, &st::menuIconSelect);
 			const auto collectBetween = [=](
 					not_null<HistoryItem*> from,
 					not_null<HistoryItem*> to,
