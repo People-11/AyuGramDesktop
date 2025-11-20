@@ -722,8 +722,12 @@ bool AddViewRepliesAction(
 		: 0;
 	const auto repliesCount = item->repliesCount();
 	const auto withReplies = (repliesCount > 0);
+	const auto isReplyToPost = !withReplies
+		&& item->replyToTop()
+		&& item->history()->peer->isMegagroup();
+
 	if (!withReplies || !item->history()->peer->isMegagroup()) {
-		if (!topicRootId) {
+		if (!topicRootId && !isReplyToPost) {
 			return false;
 		}
 	}
@@ -1067,47 +1071,11 @@ bool AddClearSelectionAction(
 	return true;
 }
 
-bool AddSelectMessageAction(
-		not_null<Ui::PopupMenu*> menu,
-		const ContextMenuRequest &request,
-		not_null<ListWidget*> list) {
-	const auto item = request.item;
-	if (request.overSelection && !request.selectedItems.empty()) {
-		return false;
-	} else if (!item
-		|| (item->isLocal() && !item->isEphemeral())
-		|| item->isService()
-		|| list->hasSelectRestriction()) {
-		return false;
-	}
-	const auto owner = &item->history()->owner();
-	if (!request.selectedItems.empty()) {
-		const auto first = owner->message(request.selectedItems.front().msgId);
-		if (first && !first->inSameSelectionGroup(item)) {
-			return false;
-		}
-	}
-	const auto itemId = item->fullId();
-	const auto asGroup = (request.pointState != PointState::GroupPart);
-	menu->addAction(tr::lng_context_select_msg(tr::now), [=] {
-		if (const auto item = owner->message(itemId)) {
-			if (asGroup) {
-				list->selectItemAsGroup(item);
-			} else {
-				list->selectItem(item);
-			}
-		}
-	}, &st::menuIconSelect);
-	return true;
-}
-
 void AddSelectionAction(
 		not_null<Ui::PopupMenu*> menu,
 		const ContextMenuRequest &request,
 		not_null<ListWidget*> list) {
-	if (!AddClearSelectionAction(menu, request, list)) {
-		AddSelectMessageAction(menu, request, list);
-	}
+	AddClearSelectionAction(menu, request, list);
 }
 
 void AddTopMessageActions(
