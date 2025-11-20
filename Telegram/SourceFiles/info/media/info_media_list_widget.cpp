@@ -1358,7 +1358,8 @@ void ListWidget::showContextMenu(
 			}
 		}
 		if (!_provider->hasSelectRestriction()) {
-			_contextMenu->addAction(
+			// Commented out: Select option removed from context menu
+			/*_contextMenu->addAction(
 				tr::lng_context_select_msg(tr::now),
 				crl::guard(this, [=] {
 					if (hasSelectedText()) {
@@ -1372,7 +1373,7 @@ void ListWidget::showContextMenu(
 						MessageByGlobalId(globalId),
 						FullSelection);
 				}),
-				&st::menuIconSelect);
+				&st::menuIconSelect);*/
 		}
 	}
 
