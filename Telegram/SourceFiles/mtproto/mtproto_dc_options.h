@@ -115,13 +115,20 @@ public:
 	bool loadFromFile(const QString &path);
 	bool writeToFile(const QString &path) const;
 
+	static void SetImproveDC5(bool enabled);
+	static bool ShouldImproveDC5();
+	void refresh();
+
 private:
 	bool applyOneGuarded(
+		base::flat_map<DcId, std::vector<Endpoint>> &data,
 		DcId dcId,
 		Flags flags,
 		const std::string &ip,
 		int port,
 		const bytes::vector &secret);
+	[[nodiscard]] base::flat_map<DcId, std::vector<Endpoint>> refreshedData(
+		const base::flat_map<DcId, std::vector<Endpoint>> &data) const;
 	static bool ApplyOneOption(
 		base::flat_map<DcId, std::vector<Endpoint>> &data,
 		DcId dcId,
@@ -148,6 +155,7 @@ private:
 	friend class ReadLocker;
 
 	const Environment _environment = Environment();
+	base::flat_map<DcId, std::vector<Endpoint>> _rawData;
 	base::flat_map<DcId, std::vector<Endpoint>> _data;
 	base::flat_set<DcId> _cdnDcIds;
 	base::flat_map<uint64, details::RSAPublicKey> _publicKeys;

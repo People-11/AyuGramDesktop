@@ -77,6 +77,19 @@ t6N/byY9Nw9p21Og3AoXSL2q/2IJ1WRUhebgAdGVMlV1fkuOQoEzR7EdpqtQD9Cs\n\
 5+bfo3Nhmcyvk5ftB0WkJ9z6bNZ7yxrP8wIDAQAB\n\
 -----END RSA PUBLIC KEY-----" };
 
+std::atomic<bool> _improveDC5 = false;
+
+const auto kBadDc5Ips = {
+	"91.108.56.100", "91.108.56.101", "91.108.56.104", "91.108.56.107",
+	"91.108.56.109", "91.108.56.110", "91.108.56.113", "91.108.56.145",
+	"91.108.56.120", "91.108.56.125", "91.108.56.126", "91.108.56.128",
+	"91.108.56.134", "91.108.56.138", "91.108.56.143", "91.108.56.156"
+};
+
+const auto kGoodDc5Ips = {
+	"91.108.56.147", "91.108.56.135", "91.108.56.130"
+};
+
 } // namespace
 
 class DcOptions::WriteLocker {
@@ -165,6 +178,7 @@ bool DcOptions::isTestMode() const {
 
 void DcOptions::constructFromBuiltIn() {
 	WriteLocker lock(this);
+	_rawData.clear();
 	_data.clear();
 
 	readBuiltInPublicKeys();
@@ -174,7 +188,7 @@ void DcOptions::constructFromBuiltIn() {
 		: gsl::make_span(kBuiltInDcs).subspan(0);
 	for (const auto &entry : list) {
 		const auto flags = Flag::f_static | 0;
-		applyOneGuarded(entry.id, flags, entry.ip, entry.port, {});
+		applyOneGuarded(_rawData, entry.id, flags, entry.ip, entry.port, {});
 		DEBUG_LOG(("MTP Info: adding built in DC %1 connect option: %2:%3"
 			).arg(entry.id
 			).arg(entry.ip
@@ -186,13 +200,14 @@ void DcOptions::constructFromBuiltIn() {
 		: gsl::make_span(kBuiltInDcsIPv6).subspan(0);
 	for (const auto &entry : listv6) {
 		const auto flags = Flag::f_static | Flag::f_ipv6;
-		applyOneGuarded(entry.id, flags, entry.ip, entry.port, {});
+		applyOneGuarded(_rawData, entry.id, flags, entry.ip, entry.port, {});
 		DEBUG_LOG(("MTP Info: adding built in DC %1 IPv6 connect option: "
 			"%2:%3"
 			).arg(entry.id
 			).arg(entry.ip
 			).arg(entry.port));
 	}
+	_data = refreshedData(_rawData);
 }
 
 void DcOptions::processFromList(
@@ -207,7 +222,7 @@ void DcOptions::processFromList(
 			return base::flat_map<DcId, std::vector<Endpoint>>();
 		}
 		ReadLocker lock(this);
-		return _data;
+		return _rawData;
 	}();
 	for (auto &mtpOption : options) {
 		if (mtpOption.type() != mtpc_dcOption) {
@@ -223,14 +238,18 @@ void DcOptions::processFromList(
 			option.vip_address().v.size());
 		auto port = option.vport().v;
 		auto secret = bytes::make_vector(option.vsecret().value_or_empty());
-		ApplyOneOption(data, dcId, flags, ip, port, secret);
+		applyOneGuarded(data, dcId, flags, ip, port, secret);
 	}
+	auto refreshed = refreshedData(data);
 
 	const auto difference = [&] {
 		WriteLocker lock(this);
-		auto result = CountOptionsDifference(_data, data);
+		auto result = CountOptionsDifference(_data, refreshed);
 		if (!result.empty()) {
-			_data = std::move(data);
+			_rawData = std::move(data);
+			_data = std::move(refreshed);
+		} else {
+			_rawData = std::move(data);
 		}
 		return result;
 	}();
@@ -255,28 +274,29 @@ void DcOptions::addFromOther(DcOptions &&options) {
 	auto idsChanged = std::vector<DcId>();
 	{
 		ReadLocker lock(&options);
-		if (options._data.empty()) {
+		if (options._rawData.empty()) {
 			return;
 		}
 
-		idsChanged.reserve(options._data.size());
+		idsChanged.reserve(options._rawData.size());
 		{
 			WriteLocker lock(this);
 			const auto changed = [&](const std::vector<Endpoint> &list) {
 				auto result = false;
 				for (const auto &endpoint : list) {
-					const auto dcId = endpoint.id;
-					const auto flags = endpoint.flags;
-					const auto &ip = endpoint.ip;
-					const auto port = endpoint.port;
-					const auto &secret = endpoint.secret;
-					if (applyOneGuarded(dcId, flags, ip, port, secret)) {
+					if (applyOneGuarded(
+						_rawData,
+						endpoint.id,
+						endpoint.flags,
+						endpoint.ip,
+						endpoint.port,
+						endpoint.secret)) {
 						result = true;
 					}
 				}
 				return result;
 			};
-			for (const auto &item : base::take(options._data)) {
+			for (const auto &item : base::take(options._rawData)) {
 				if (changed(item.second)) {
 					idsChanged.push_back(item.first);
 				}
@@ -286,6 +306,7 @@ void DcOptions::addFromOther(DcOptions &&options) {
 					_cdnPublicKeys[item.first].insert(std::move(entry));
 				}
 			}
+			_data = refreshedData(_rawData);
 		}
 	}
 	for (const auto dcId : idsChanged) {
@@ -300,19 +321,11 @@ void DcOptions::constructAddOne(
 		int port,
 		const bytes::vector &secret) {
 	WriteLocker lock(this);
-	applyOneGuarded(BareDcId(id), flags, ip, port, secret);
+	applyOneGuarded(_rawData, BareDcId(id), flags, ip, port, secret);
+	_data = refreshedData(_rawData);
 }
 
 bool DcOptions::applyOneGuarded(
-		DcId dcId,
-		Flags flags,
-		const std::string &ip,
-		int port,
-		const bytes::vector &secret) {
-	return ApplyOneOption(_data, dcId, flags, ip, port, secret);
-}
-
-bool DcOptions::ApplyOneOption(
 		base::flat_map<DcId, std::vector<Endpoint>> &data,
 		DcId dcId,
 		Flags flags,
@@ -321,7 +334,7 @@ bool DcOptions::ApplyOneOption(
 		const bytes::vector &secret) {
 	auto i = data.find(dcId);
 	if (i != data.cend()) {
-		for (auto &endpoint : i->second) {
+		for (const auto &endpoint : i->second) {
 			if (endpoint.ip == ip && endpoint.port == port) {
 				return false;
 			}
@@ -333,6 +346,85 @@ bool DcOptions::ApplyOneOption(
 			Endpoint(dcId, flags, ip, port, secret)));
 	}
 	return true;
+}
+
+void DcOptions::SetImproveDC5(bool enabled) {
+	_improveDC5 = enabled;
+}
+
+bool DcOptions::ShouldImproveDC5() {
+	return _improveDC5;
+}
+
+void DcOptions::refresh() {
+	const auto difference = [&] {
+		WriteLocker lock(this);
+		auto refreshed = refreshedData(_rawData);
+		auto result = CountOptionsDifference(_data, refreshed);
+		if (!result.empty()) {
+			_data = std::move(refreshed);
+		}
+		return result;
+	}();
+	for (const auto dcId : difference) {
+		_changed.fire_copy(dcId);
+	}
+}
+
+base::flat_map<DcId, std::vector<DcOptions::Endpoint>> DcOptions::refreshedData(
+		const base::flat_map<DcId, std::vector<Endpoint>> &data) const {
+	auto result = base::flat_map<DcId, std::vector<Endpoint>>();
+	for (const auto &item : data) {
+		for (const auto &endpoint : item.second) {
+			ApplyOneOption(
+				result,
+				endpoint.id,
+				endpoint.flags,
+				endpoint.ip,
+				endpoint.port,
+				endpoint.secret);
+		}
+	}
+	return result;
+}
+
+bool DcOptions::ApplyOneOption(
+		base::flat_map<DcId, std::vector<Endpoint>> &data,
+		DcId dcId,
+		Flags flags,
+		const std::string &ip,
+		int port,
+		const bytes::vector &secret) {
+	auto add = [&](const std::string &ip) {
+		auto i = data.find(dcId);
+		if (i != data.cend()) {
+			for (auto &endpoint : i->second) {
+				if (endpoint.ip == ip && endpoint.port == port) {
+					return false;
+				}
+			}
+			i->second.emplace_back(dcId, flags, ip, port, secret);
+		} else {
+			data.emplace(dcId, std::vector<Endpoint>(
+				1,
+				Endpoint(dcId, flags, ip, port, secret)));
+		}
+		return true;
+	};
+
+	if (ShouldImproveDC5()) {
+		if (std::any_of(kBadDc5Ips.begin(), kBadDc5Ips.end(), [&](const char *bad) { return ip == bad; })) {
+			auto result = false;
+			for (const auto &goodIp : kGoodDc5Ips) {
+				if (add(goodIp)) {
+					result = true;
+				}
+			}
+			return result;
+		}
+	}
+
+	return add(ip);
 }
 
 std::vector<DcId> DcOptions::CountOptionsDifference(
@@ -399,7 +491,7 @@ QByteArray DcOptions::serialize() const {
 	// Dc options.
 	auto optionsCount = 0;
 	size += sizeof(qint32);
-	for (const auto &item : _data) {
+	for (const auto &item : _rawData) {
 		if (isTemporaryDcId(item.first)) {
 			continue;
 		}
@@ -447,7 +539,7 @@ QByteArray DcOptions::serialize() const {
 
 		// Dc options.
 		stream << qint32(optionsCount);
-		for (const auto &item : _data) {
+		for (const auto &item : _rawData) {
 			if (isTemporaryDcId(item.first)) {
 				continue;
 			}
@@ -495,6 +587,7 @@ bool DcOptions::constructFromSerialized(const QByteArray &serialized) {
 	}
 
 	WriteLocker lock(this);
+	_rawData.clear();
 	_data.clear();
 	for (auto i = 0; i != count; ++i) {
 		qint32 id = 0, flags = 0, port = 0, ipSize = 0;
@@ -532,12 +625,14 @@ bool DcOptions::constructFromSerialized(const QByteArray &serialized) {
 		}
 
 		applyOneGuarded(
+			_rawData,
 			DcId(id),
 			Flags::from_raw(flags),
 			ip,
 			port,
 			secret);
 	}
+	_data = refreshedData(_rawData);
 
 	// Read CDN config
 	if (!stream.atEnd() && version > 1) {
