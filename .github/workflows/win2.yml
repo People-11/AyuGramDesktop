@@ -196,6 +196,15 @@ jobs:
           restore-keys: ${{ runner.OS }}-x64-libs-
           fail-on-cache-miss: true
 
+      - name: Apply Smooth Scroll Patch
+        shell: powershell
+        run: |
+          cd "$env:TBUILD\$env:REPO_NAME"
+          $patchPath = "$env:RUNNER_TEMP\smooth_scroll.patch"
+          $patch = [IO.File]::ReadAllText("$env:TBUILD\$env:REPO_NAME\patches\smooth_scroll.patch").Replace("`r`n", "`n")
+          [IO.File]::WriteAllText($patchPath, $patch, [Text.UTF8Encoding]::new($false))
+          git -C Telegram/lib_ui apply --ignore-whitespace $patchPath
+
       - name: Restore Desktop cache
         id: desktop-cache
         uses: actions/cache/restore@v4

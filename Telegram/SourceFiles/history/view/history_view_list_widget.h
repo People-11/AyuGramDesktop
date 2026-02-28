@@ -926,6 +926,8 @@ private:
 	bool _scrollDateAfterDayCrossing = false;
 	ClickHandlerPtr _scrollDateLink;
 	SingleQueuedInvokation _applyUpdatedScrollState;
+	base::Timer _downloadedContentRepaintTimer;
+	bool _downloadedContentRepaintPending = false;
 
 	MessagesBar _bar;
 	rpl::variable<QString> _barText;

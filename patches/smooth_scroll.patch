@@ -1,0 +1,331 @@
+diff --git a/ui/effects/animations.cpp b/ui/effects/animations.cpp
+--- a/ui/effects/animations.cpp
++++ b/ui/effects/animations.cpp
+@@ -26,2 +26,6 @@ namespace {
++#ifdef Q_OS_WIN
++constexpr auto kAnimationTick = crl::time(2);
++#else
+ constexpr auto kAnimationTick = crl::time(1000) / st::universalDuration;
++#endif // Q_OS_WIN
+ constexpr auto kIgnoreUpdatesTimeout = crl::time(4);
+@@ -29,4 +29,11 @@ namespace {
+ Manager *ManagerInstance = nullptr;
+ bool ScheduleWithInvokeQueued = false;
++Fn<crl::time()> FrameTimeGetter;
++
++// Animation clock, quantized to the display refresh where a getter is
++// installed, so animations in one frame share one time value.
++[[nodiscard]] crl::time FrameNow() {
++	return FrameTimeGetter ? FrameTimeGetter() : crl::now();
++}
+ 
+ } // namespace
+@@ -52,7 +63,7 @@ void Basic::restart() {
+ void Basic::restart() {
+ 	Expects(_started >= 0);
+ 
+-	_started = crl::now();
++	_started = FrameNow();
+ 
+ 	Ensures(_started >= 0);
+ }
+@@ -60,7 +71,7 @@ void Basic::markStarted() {
+ void Basic::markStarted() {
+ 	Expects(_started < 0);
+ 
+-	_started = crl::now();
++	_started = FrameNow();
+ 
+ 	Ensures(_started >= 0);
+ }
+@@ -129,13 +140,17 @@ void Manager::update() {
+ 	const auto now = crl::now();
++
++	// Positions use the frame clock, scheduling keeps the wall clock.
++	// Mixing them makes schedule() spin on an already expired deadline.
++	const auto frame = FrameNow();
+ 	if (_forceImmediateUpdate) {
+ 		_forceImmediateUpdate = false;
+ 	}
+ 	schedule();
+ 
+ 	_updating = true;
+ 	const auto guard = gsl::finally([&] { _updating = false; });
+ 
+ 	_lastUpdateTime = now;
+ 	const auto isFinished = [&](const ActiveBasicPointer &element) {
+-		return !element.call(now);
++		return !element.call(frame);
+ 	};
+@@ -217,6 +232,10 @@ void Manager::SetScheduleWithInvokeQueued(bool value) {
+ void Manager::SetScheduleWithInvokeQueued(bool value) {
+ 	ScheduleWithInvokeQueued = value;
+ }
+ 
++void Manager::SetFrameTimeGetter(Fn<crl::time()> getter) {
++	FrameTimeGetter = std::move(getter);
++}
++
+ } // namespace Animations
+ } // namespace Ui
+diff --git a/ui/effects/animations.h b/ui/effects/animations.h
+--- a/ui/effects/animations.h
++++ b/ui/effects/animations.h
+@@ -150,5 +150,9 @@ public:
+ 	void update();
+ 
+ 	static void SetScheduleWithInvokeQueued(bool value);
+ 
++	// Must return a value that changes once per displayed frame.
++#define UI_ANIMATIONS_FRAME_TIME_GETTER 1
++	static void SetFrameTimeGetter(Fn<crl::time()> getter);
++
+ private:
+diff --git a/ui/widgets/elastic_scroll.cpp b/ui/widgets/elastic_scroll.cpp
+index 7fb2939..eaa7c5c 100644
+--- a/ui/widgets/elastic_scroll.cpp
++++ b/ui/widgets/elastic_scroll.cpp
+@@ -420,9 +420,16 @@ ElasticScroll::ElasticScroll(
+ , _position(Position{ 0, 0 })
+ , _movement(Movement::None) {
+ 	setAttribute(Qt::WA_AcceptTouchEvents);
++	_wheelScroll = std::make_unique<DiscreteScrollAnimation>(
++		DiscreteScrollAnimation::Callbacks{
++			.position = [=] { return _state.visibleFrom; },
++			.apply = [=](int value) { applyScrollTo(value); },
++			.clamp = [=](int value) { return willScrollTo(value); },
++		});
+ 
+ 	_bar->visibleFromDragged(
+ 	) | rpl::on_next([=](int from) {
++		_wheelScroll->stop();
+ 		tryScrollTo(from, false);
+ 	}, _bar->lifetime());
+ 
+@@ -990,6 +997,7 @@ void ElasticScroll::paintEvent(QPaintEvent *e) {
+ bool ElasticScroll::handleWheelEvent(not_null<QWheelEvent*> e, bool touch) {
+ 	if (_customWheelProcess
+ 		&& _customWheelProcess(static_cast<QWheelEvent*>(e.get()))) {
++		_wheelScroll->stop();
+ 		return true;
+ 	}
+ 	const auto phase = e->phase();
+@@ -1051,6 +1059,9 @@ bool ElasticScroll::handleWheelEvent(not_null<QWheelEvent*> e, bool touch) {
+ 		ignore = true;
+ 		delta = 0;
+ 	}
++	if (phase != Qt::NoScrollPhase) {
++		_wheelScroll->stop();
++	}
+ 	if (phase == Qt::NoScrollPhase) {
+ 		if (_overscroll == currentOverscrollDefault()) {
+ 			const auto weak = base::make_weak(this);
+@@ -1058,10 +1069,23 @@ bool ElasticScroll::handleWheelEvent(not_null<QWheelEvent*> e, bool touch) {
+ 			if (!weak) {
+ 				return true;
+ 			}
+-			tryScrollTo(_state.visibleFrom + delta);
++			const auto angle = _vertical
++				? e->angleDelta().y()
++				: e->angleDelta().x();
++			if (!touch
++				&& e->pixelDelta().isNull()
++				&& std::abs(angle) == 120) {
++				_wheelScroll->handle(delta);
++			} else {
++				_wheelScroll->stop();
++				tryScrollTo(_state.visibleFrom + delta);
++			}
+ 			_movement = Movement::None;
+-		} else if (!_overscrollReturnAnimation.animating()) {
+-			overscrollReturn();
++		} else {
++			_wheelScroll->stop();
++			if (!_overscrollReturnAnimation.animating()) {
++				overscrollReturn();
++			}
+ 		}
+ 		return true;
+ 	} else if (_scroller && !touch) {
+@@ -1394,6 +1418,7 @@ bool ElasticScroll::filterOutTouchEvent(QEvent *e) {
+ }
+ 
+ void ElasticScroll::handleTouchEvent(QTouchEvent *e) {
++	_wheelScroll->stop();
+ 	if (!e->touchPoints().isEmpty()) {
+ 		_touchPreviousPosition = _touchPosition;
+ 		_touchPosition = e->touchPoints().cbegin()->screenPos().toPoint();
+diff --git a/ui/widgets/elastic_scroll.h b/ui/widgets/elastic_scroll.h
+index 9352c4b..ce55a6f 100644
+--- a/ui/widgets/elastic_scroll.h
++++ b/ui/widgets/elastic_scroll.h
+@@ -334,6 +334,7 @@ private:
+ 
+ 	QPointer<QScroller> _scroller;
+ 	QPoint _wheelPos;
++	std::unique_ptr<DiscreteScrollAnimation> _wheelScroll;
+ 
+ 	base::Timer _touchTimer;
+ 	base::Timer _touchScrollTimer;
+diff --git a/ui/widgets/scroll_area.cpp b/ui/widgets/scroll_area.cpp
+index 03dc8c4..cfca744 100644
+--- a/ui/widgets/scroll_area.cpp
++++ b/ui/widgets/scroll_area.cpp
+@@ -26,6 +26,8 @@
+ namespace Ui {
+ namespace {
+ 
++constexpr auto kDiscreteScrollDuration = crl::time(260);
++
+ base::options::toggle OptionQScroller({
+ 	.id = kOptionQScroller,
+ 	.name = "Use QScroller for touchpad scrolling",
+@@ -74,4 +76,49 @@ base::options::toggle OptionQScroller({
+ 
+ const char kOptionQScroller[] = "qscroller";
+ 
++DiscreteScrollAnimation::DiscreteScrollAnimation(Callbacks callbacks)
++: _callbacks(std::move(callbacks)) {
++}
++
++bool DiscreteScrollAnimation::handle(int delta) {
++	if (!delta) {
++		return true;
++	}
++	auto current = _callbacks.position();
++	if (_animation.animating()
++		&& _lastApplied >= 0
++		&& current != _lastApplied) {
++		stop();
++		current = _callbacks.position();
++	}
++	const auto remaining = _target - current;
++	const auto sameDirection = _animation.animating()
++		&& remaining
++		&& ((remaining > 0) == (delta > 0));
++	const auto origin = sameDirection ? _target : current;
++	const auto target = _callbacks.clamp(origin + delta * 2);
++	if (target == current) {
++		stop();
++		return true;
++	}
++	_target = target;
++	_lastApplied = current;
++	_animation.start([this](float64 value) {
++		if (_callbacks.position() != _lastApplied) {
++			stop();
++			return;
++		}
++		const auto expected = base::SafeRound(value);
++		_lastApplied = expected;
++		_callbacks.apply(expected);
++	}, current, target, kDiscreteScrollDuration, anim::easeOutCubic);
++	_animation.setFinishedCallback([this] { _lastApplied = -1; });
++	return true;
++}
++
++void DiscreteScrollAnimation::stop() {
++	_animation.stop();
++	_lastApplied = -1;
++}
++
+ void SetupScrollerPhysics(not_null<QScroller*> scroller) {
+@@ -590,6 +637,20 @@ ScrollArea::ScrollArea(
+ 		_touchScrollTimer.setCallback([=] { touchScrollTimer(); });
+ 	}
+ 
++	_wheelScroll = std::make_unique<DiscreteScrollAnimation>(
++		DiscreteScrollAnimation::Callbacks{
++			.position = [=] { return verticalScrollBar()->value(); },
++			.apply = [=](int value) {
++				verticalScrollBar()->setValue(value);
++			},
++			.clamp = [=](int value) {
++				return std::clamp(
++					value,
++					verticalScrollBar()->minimum(),
++					verticalScrollBar()->maximum());
++			},
++		});
++
+ 	rpl::single(
+ 		rpl::empty
+ 	) | rpl::then(
+@@ -782,6 +843,7 @@ bool ScrollArea::viewportEvent(QEvent *e) {
+ 	} else if (e->type() == QEvent::Wheel) {
+ 		const auto ev = static_cast<QWheelEvent*>(e);
+ 		if (_customWheelProcess && _customWheelProcess(ev)) {
++			_wheelScroll->stop();
+ 			return true;
+ 		}
+ 		if (_wheelDirectionLocked || _crossAxisWheelProcess) {
+@@ -807,6 +869,13 @@ bool ScrollArea::viewportEvent(QEvent *e) {
+ 						phase);
+ 			}
+ 		}
++		const auto angle = ev->angleDelta().y();
++		if (ev->phase() == Qt::NoScrollPhase
++			&& ev->pixelDelta().isNull()
++			&& std::abs(angle) == 120) {
++			return _wheelScroll->handle(-ScrollDelta(ev).y());
++		}
++		_wheelScroll->stop();
+ 		if (_scroller) {
+ 			switch (ev->phase()) {
+ 			case Qt::ScrollBegin:
+@@ -881,6 +950,7 @@ bool ScrollArea::filterOutTouchEvent(QEvent *e) {
+ }
+ 
+ void ScrollArea::touchEvent(QTouchEvent *e) {
++	_wheelScroll->stop();
+ 	if (!e->touchPoints().isEmpty()) {
+ 		_touchPrevPos = _touchPos;
+ 		_touchPos = e->touchPoints().cbegin()->screenPos().toPoint();
+@@ -1165,6 +1235,9 @@ bool ScrollArea::focusNextPrevChild(bool next) {
+ }
+ 
+ void ScrollArea::setMovingByScrollBar(bool movingByScrollBar) {
++	if (movingByScrollBar) {
++		_wheelScroll->stop();
++	}
+ 	_movingByScrollBar = movingByScrollBar;
+ }
+ 
+diff --git a/ui/widgets/scroll_area.h b/ui/widgets/scroll_area.h
+index 7291e1d..bdb0b07 100644
+--- a/ui/widgets/scroll_area.h
++++ b/ui/widgets/scroll_area.h
+@@ -49,6 +49,25 @@ struct ScrollToRequest {
+ 
+ };
+ 
++class DiscreteScrollAnimation final {
++public:
++	struct Callbacks {
++		Fn<int()> position;
++		Fn<void(int)> apply;
++		Fn<int(int)> clamp;
++	};
++
++	explicit DiscreteScrollAnimation(Callbacks callbacks);
++	bool handle(int delta);
++	void stop();
++
++private:
++	Callbacks _callbacks;
++	Animations::Simple _animation;
++	int _target = 0;
++	int _lastApplied = -1;
++};
++
+ extern const char kOptionQScroller[];
+ 
+ // Tune a QScroller to approximate macOS native momentum. QScroller only
+@@ -287,6 +306,7 @@ private:
+ 
+ 	QPointer<QScroller> _scroller;
+ 	QPoint _wheelPos;
++	std::unique_ptr<DiscreteScrollAnimation> _wheelScroll;
+ 
+ 	bool _touchEnabled = false;
+ 	base::Timer _touchTimer;
