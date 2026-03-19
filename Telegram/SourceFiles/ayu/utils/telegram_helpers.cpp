@@ -721,6 +721,15 @@ bool isMessageSavable(const not_null<HistoryItem*> item) {
 	if (const auto possiblyBot = item->history()->peer->asUser()) {
 		return !possiblyBot->isBot() || (settings.saveForBots() && possiblyBot->isBot());
 	}
+
+	if (settings.excludeBotsInGroups()) {
+		const auto from = item->from();
+		const auto user = from ? from->asUser() : nullptr;
+		if (user && user->isBot()) {
+			return false;
+		}
+	}
+
 	return true;
 }
 
