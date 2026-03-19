@@ -659,6 +659,12 @@ void BuildSpyEssentials(SectionBuilder &builder, AyuSectionBuilder &ayu) {
 		.getter = &AyuSettings::saveForBots,
 		.setter = &AyuSettings::setSaveForBots,
 	});
+	ayu.addSettingToggle({
+		.id = u"ayu/excludeBotsInGroups"_q,
+		.title = tr::ayu_MessageSavingExcludeBotsInGroups(),
+		.getter = &AyuSettings::excludeBotsInGroups,
+		.setter = &AyuSettings::setExcludeBotsInGroups,
+	});
 }
 
 void BuildOther(SectionBuilder &builder, AyuSectionBuilder &ayu) {
