@@ -9011,7 +9011,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 "ayu_ContextHideMessage" = "Hide";
 "ayu_SearchByIDResults" = "Found by ID";
 "ayu_ContextCopyCallbackData" = "Copy Callback Data";
-"ayu_RepeatMessage" = "Repeat Message";
+"ayu_RepeatMessage" = "复读";
 "ayu_RegisterURLScheme" = "Register URL Scheme";
 "ayu_PluginVersion" = "Version";
 "ayu_PluginNoDescription" = "No description provided.";
