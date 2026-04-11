@@ -40,7 +40,7 @@ qint64 fileSize(const QString &path);
 	not_null<Main::Session*> session,
 	const std::vector<not_null<HistoryItem*>> &items,
 	const Fn<bool()> &cancelled);
-void sendMessageSync(not_null<Main::Session*> session, Api::MessageToSend &&message);
+bool sendMessageSync(not_null<Main::Session*> session, Api::MessageToSend &&message);
 
 void sendDocumentSync(not_null<Main::Session*> session,
 					  Ui::PreparedGroup &group,
