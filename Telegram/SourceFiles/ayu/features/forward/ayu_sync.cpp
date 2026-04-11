@@ -497,19 +497,29 @@ void loadPhotoSync(
 	});
 }
 
-void sendMessageSync(not_null<Main::Session*> session, Api::MessageToSend &&message) {
-	const auto action = message.action;
-	crl::on_main([=, message = std::move(message)]() mutable
-	{
-		// we cannot send events to objects
-		// owned by a different thread
-		// because sendMessage updates UI too
+bool sendMessageSync(not_null<Main::Session*> session, Api::MessageToSend &&message) {
+	auto latch = std::make_shared<TimedCountDownLatch>(1);
+	auto lifetime = std::make_shared<rpl::lifetime>();
 
-		session->api().sendMessage(std::move(message));
+	crl::on_main_sync([=, message = std::move(message)]() mutable {
+		const auto localId = FullMsgId(
+			message.action.history->peer->id,
+			session->data().nextLocalMessageId());
+		session->data().itemIdChanged(
+		) | rpl::filter([=](const Data::Session::IdChange &update) {
+			return (localId.peer == update.newId.peer)
+				&& (localId.msg == update.oldId);
+		}) | rpl::on_next([=] {
+			latch->countDown();
+		}, *lifetime);
+		session->api().sendMessage(std::move(message), localId.msg);
 	});
 
-
-	waitForMsgSync(session, action);
+	const auto done = latch->await(std::chrono::minutes(5));
+	crl::on_main([lifetime = base::take(lifetime)] {
+		lifetime->destroy();
+	});
+	return done;
 }
 
 void waitForMsgSync(not_null<Main::Session*> session, const Api::SendAction &action) {
