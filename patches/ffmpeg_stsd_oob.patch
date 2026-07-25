@@ -1,0 +1,28 @@
+Fix OOB free in the MOV demuxer's STSD parser (FFmpeg n6.1.1).
+
+Upstream commit a58cb16e27bc0c32906cfb3de36e4a495c0a8602 (Ted Meyer, 2026-02-03),
+not present in n6.1.1 which prepare.py pins.
+
+mov_read_stsd() leaves sc->stsd_count stale when ff_mov_read_stsd_entries()
+fails partway, while freeing and NULLing sc->extradata/extradata_size. A root
+level stsd that fails, followed by a second one that succeeds, then passes the
+"Duplicate stsd" guard and allocates a smaller array while the counter keeps
+counting up. mov_read_close() then walks sc->stsd_count entries past the end of
+that array and calls av_free() on whatever heap data follows it.
+
+Reachable from a plain .mp4: a crafted sidx sets frag_index.complete, which
+makes mov_read_default() defer trailing root atoms to mov_switch_root() during
+packet reading, giving the two parse passes the desync needs.
+
+diff --git a/libavformat/mov.c b/libavformat/mov.c
+index 606fe22..f06ff0c 100644
+--- a/libavformat/mov.c
++++ b/libavformat/mov.c
+@@ -2871,6 +2871,7 @@ fail:
+             av_freep(&sc->extradata[j]);
+     }
+ 
++    sc->stsd_count = 0;
+     av_freep(&sc->extradata);
+     av_freep(&sc->extradata_size);
+     return ret;

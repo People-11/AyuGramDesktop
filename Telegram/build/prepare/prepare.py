@@ -55,6 +55,9 @@ keysLoc = 'cache_keys'
 rootDir = os.getcwd()
 libsDir = os.path.realpath(os.path.join(rootDir, libsLoc))
 thirdPartyDir = os.path.realpath(os.path.join(rootDir, 'ThirdParty'))
+# Patches kept in this repo, as opposed to the ones under Libraries/patches
+# that the 'depends:' directive globs for.
+repoPatchesDir = os.path.realpath(os.path.join(scriptPath, '..', '..', '..', 'patches'))
 usedPrefix = os.path.realpath(os.path.join(libsDir, 'local'))
 
 optionsList = [
@@ -1153,6 +1156,7 @@ stage('regex', """
 stage('ffmpeg', """
     git clone -b n6.1.1 https://github.com/FFmpeg/FFmpeg.git ffmpeg
     cd ffmpeg
+    git apply \"""" + os.path.join(repoPatchesDir, 'ffmpeg_stsd_oob.patch') + """\"
 win:
 depends:patches/ffmpeg.patch
     git apply ../patches/ffmpeg.patch
