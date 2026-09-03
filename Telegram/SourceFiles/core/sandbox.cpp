@@ -36,7 +36,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #endif // Q_OS_MAC
 
 #ifdef Q_OS_WIN
-#include <dwmapi.h>
 #include <timeapi.h>
 #endif // Q_OS_WIN
 
@@ -58,30 +57,6 @@ base::options::toggle OptionDeadlockDetector({
 constexpr auto kCleanupIpcTimeout = 10 * crl::time(1000);
 constexpr auto kCleanupQuitTimeout = 30 * crl::time(1000);
 
-#ifdef Q_OS_WIN
-// Idle longer than this and the frame clock restarts from the wall clock.
-constexpr auto kFrameClockStale = crl::time(50);
-
-// Rebase if the counted clock drifts this far from the wall clock.
-constexpr auto kFrameClockDrift = crl::time(16);
-
-// notify() runs while Sandbox members are still being built, and again
-// while they are destroyed. Pacing must stay out of both windows.
-bool FramePacingReady/* = false*/;
-
-[[nodiscard]] float64 RefreshPeriodMs(const DWM_TIMING_INFO &info) {
-	static const auto frequency = [] {
-		auto value = LARGE_INTEGER();
-		QueryPerformanceFrequency(&value);
-		return float64(value.QuadPart);
-	}();
-	// rateRefresh wobbles between readings, qpcRefreshPeriod does not.
-	return (frequency > 0. && info.qpcRefreshPeriod > 0)
-		? (info.qpcRefreshPeriod * 1000. / frequency)
-		: 0.;
-}
-#endif // Q_OS_WIN
-
 } // namespace
 
 const char kOptionDeadlockDetector[] = "deadlock-detector";
@@ -101,25 +76,6 @@ Sandbox::Sandbox(int &argc, char **argv)
 	// ponytail: process wide, follow Ui::Animations activity if idle
 	// power draw turns out to matter.
 	timeBeginPeriod(1);
-
-#ifdef UI_ANIMATIONS_FRAME_TIME_GETTER
-	Ui::Animations::Manager::SetFrameTimeGetter([=] {
-		return frameTime();
-	});
-#endif // UI_ANIMATIONS_FRAME_TIME_GETTER
-
-	connect(
-		QCoreApplication::eventDispatcher(),
-		&QAbstractEventDispatcher::aboutToBlock,
-		this,
-		[=] {
-			if (_frameFlushPending) {
-				_frameFlushPending = false;
-				flushFrame();
-			}
-		});
-
-	FramePacingReady = true;
 #endif // Q_OS_WIN
 }
 
@@ -376,10 +332,6 @@ void Sandbox::setupScreenScale() {
 }
 
 Sandbox::~Sandbox() {
-#ifdef Q_OS_WIN
-	// Members die after this body, notify() can still reach the pacing.
-	FramePacingReady = false;
-#endif // Q_OS_WIN
 #ifdef Q_OS_MAC
 	Platform::DestroyGlobalMenu();
 #endif // Q_OS_MAC
@@ -387,44 +339,6 @@ Sandbox::~Sandbox() {
 	timeEndPeriod(1);
 #endif // Q_OS_WIN
 }
-
-#ifdef Q_OS_WIN
-void Sandbox::updateFrameClock(uint64 refresh, float64 period, crl::time now) {
-	// Counting refreshes gives every animation in a frame the same time,
-	// one refresh apart from the last, instead of whenever its callback
-	// happened to run.
-	const auto counting = (_frameBaseRefresh != 0) && (_framePeriod > 0.);
-	const auto refreshes = counting ? int(refresh - _frameBaseRefresh) : 0;
-	const auto counted = counting
-		? (_frameBase + crl::time(base::SafeRound(refreshes * _framePeriod)))
-		: now;
-	if (!counting
-		|| refreshes < 0
-		|| (now - _frameTime) > kFrameClockStale
-		|| std::abs(counted - now) > kFrameClockDrift) {
-		_framePeriod = period;
-		_frameBase = now;
-		_frameBaseRefresh = refresh;
-		_frameTime = now;
-	} else {
-		_frameTime = counted;
-	}
-}
-
-crl::time Sandbox::frameTime() const {
-	const auto now = crl::now();
-	return ((now - _frameTime) > kFrameClockStale) ? now : _frameTime;
-}
-
-void Sandbox::flushFrame() {
-	DwmFlush();
-
-	auto info = DWM_TIMING_INFO{ sizeof(DWM_TIMING_INFO) };
-	if (DwmGetCompositionTimingInfo(nullptr, &info) == S_OK) {
-		updateFrameClock(info.cRefresh, RefreshPeriodMs(info), crl::now());
-	}
-}
-#endif // Q_OS_WIN
 
 bool Sandbox::event(QEvent *e) {
 	if (e->type() == QEvent::Quit) {
@@ -754,18 +668,6 @@ bool Sandbox::notify(QObject *receiver, QEvent *e) {
 	const auto wrap = createEventNestingLevel();
 	const auto updateRequest = (e->type() == QEvent::UpdateRequest);
 	if (updateRequest) {
-#ifdef Q_OS_WIN
-		if (receiver->isWidgetType() && FramePacingReady) {
-			if (_frameFlushPending) {
-				// A second repaint before the first reached a vblank
-				// means a repaint loop: the queue never empties, so
-				// aboutToBlock never paces it. Take the vblank here.
-				_frameFlushPending = false;
-				flushFrame();
-			}
-			_frameFlushPending = true;
-		}
-#endif // Q_OS_WIN
 		const auto weak = QPointer<QObject>(receiver);
 		_widgetUpdateRequests.fire({});
 		if (!weak) {

@@ -346,3 +346,19 @@ diff --git a/ui/gl/gl_detection.cpp b/ui/gl/gl_detection.cpp
  	},
  	.restartRequired = true,
  });
+diff --git a/ui/rp_widget.cpp b/ui/rp_widget.cpp
+--- a/ui/rp_widget.cpp
++++ b/ui/rp_widget.cpp
+@@ -341,6 +341,11 @@ RpWidget::RpWidget(QWidget *parent)
+ RpWidget::RpWidget(QWidget *parent)
+ : RpWidgetBase<QWidget>(parent) {
+ 	[[maybe_unused]] static const auto Once = [] {
+ 		auto format = QSurfaceFormat::defaultFormat();
++#ifdef Q_OS_WIN
++		// The RHI swap chain is what paces presentation now.
++		format.setSwapInterval(1);
++#else // Q_OS_WIN
+ 		format.setSwapInterval(::Platform::MetalSupported() ? 1 : 0);
++#endif // Q_OS_WIN
+ #ifdef DESKTOP_APP_USE_ANGLE
+ 		format.setRedBufferSize(8);

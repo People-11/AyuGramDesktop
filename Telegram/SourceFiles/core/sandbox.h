@@ -99,11 +99,6 @@ private:
 		const QByteArray &eventType,
 		void *message,
 		native_event_filter_result *result) override;
-#ifdef Q_OS_WIN
-	void flushFrame();
-	void updateFrameClock(uint64 refresh, float64 period, crl::time now);
-	[[nodiscard]] crl::time frameTime() const;
-#endif // Q_OS_WIN
 	void processPostponedCalls(int level);
 	void singleInstanceChecked();
 	void launchApplication();
@@ -150,14 +145,6 @@ private:
 	MTP::ProxyData _sandboxProxy;
 
 	rpl::event_stream<> _widgetUpdateRequests;
-
-#ifdef Q_OS_WIN
-	bool _frameFlushPending = false;
-	crl::time _frameTime = 0;
-	crl::time _frameBase = 0;
-	uint64 _frameBaseRefresh = 0;
-	float64 _framePeriod = 0.;
-#endif // Q_OS_WIN
 
 	std::unique_ptr<QThread> _deadlockDetector;
 
