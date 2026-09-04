@@ -76,7 +76,7 @@ jobs:
             Telegram/build/prepare/prepare.py \
             Telegram/build/prepare/win.bat \
             Telegram/build/qt_version.py > "$RUNNER_TEMP/libraries-cache-key.txt"
-          echo "x64" >> "$RUNNER_TEMP/libraries-cache-key.txt"
+          echo "x64-qt6" >> "$RUNNER_TEMP/libraries-cache-key.txt"
           CACHE_KEY=$(sha256sum --zero "$RUNNER_TEMP/libraries-cache-key.txt" | awk '{ print $1 }')
           echo "CACHE_KEY=$CACHE_KEY" >> "$GITHUB_ENV"
 
@@ -85,8 +85,8 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/TBuild/Libraries
-          key: ${{ runner.OS }}-x64-libs-${{ env.CACHE_KEY }}
-          restore-keys: ${{ runner.OS }}-x64-libs-
+          key: ${{ runner.OS }}-x64-qt6-libs-${{ env.CACHE_KEY }}
+          restore-keys: ${{ runner.OS }}-x64-qt6-libs-
 
       - name: Setup MSVC
         if: steps.libraries-cache.outputs.cache-hit != 'true'
@@ -103,7 +103,7 @@ jobs:
           nuget sources Disable -Name "Microsoft Visual Studio Offline Packages"
           nuget sources Add -Source https://api.nuget.org/v3/index.json
           cd %TBUILD%
-          %REPO_NAME%\Telegram\build\prepare\win.bat silent
+          %REPO_NAME%\Telegram\build\prepare\win.bat silent qt6
 
       - name: Clean temporary files
         if: steps.libraries-cache.outputs.cache-hit != 'true'
@@ -116,8 +116,14 @@ jobs:
           $gitDirectories |
             Sort-Object { $_.FullName.Length } -Descending |
             Remove-Item -Recurse -Force
+          # A static Qt 6 installs resource objects that its imported
+          # targets point at, so the installed tree has to survive this.
+          $qtInstalled = Join-Path $root 'win64\Qt-'
           Get-ChildItem -LiteralPath $root -Recurse -Force -File |
-            Where-Object { $_.Name -eq '.git' -or $_.Extension -in '.pdb', '.pch', '.obj', '.ilk' } |
+            Where-Object {
+              ($_.FullName -notlike "$qtInstalled*") -and
+              ($_.Name -eq '.git' -or $_.Extension -in '.pdb', '.pch', '.obj', '.ilk')
+            } |
             Remove-Item -Force
           $win64 = Join-Path $root 'win64'
           Get-ChildItem -LiteralPath (Join-Path $win64 'cache_keys') -Force -File |
@@ -153,7 +159,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ~/TBuild/Libraries
-          key: ${{ runner.OS }}-x64-libs-${{ env.CACHE_KEY }}
+          key: ${{ runner.OS }}-x64-qt6-libs-${{ env.CACHE_KEY }}
 
   build-desktop:
     name: Build Desktop
@@ -192,8 +198,8 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/TBuild/Libraries
-          key: ${{ runner.OS }}-x64-libs-${{ needs.build-libraries.outputs.cache-key }}
-          restore-keys: ${{ runner.OS }}-x64-libs-
+          key: ${{ runner.OS }}-x64-qt6-libs-${{ needs.build-libraries.outputs.cache-key }}
+          restore-keys: ${{ runner.OS }}-x64-qt6-libs-
           fail-on-cache-miss: true
 
       - name: Apply Smooth Scroll Patch
@@ -218,8 +224,8 @@ jobs:
             !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\**\*.pdb
             !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\**\*.ilk
             !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\**\*.exp
-          key: ${{ runner.OS }}-x64-desktop-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: ${{ runner.OS }}-x64-desktop-
+          key: ${{ runner.OS }}-x64-qt6-desktop-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: ${{ runner.OS }}-x64-qt6-desktop-
 
       - name: Restore Desktop cache timestamps
         if: steps.desktop-cache.outputs.cache-matched-key != ''
@@ -273,11 +279,12 @@ jobs:
           GYP_MSVS_VERSION: 2022
         run: |
           cd %TBUILD%
-          call %REPO_NAME%\Telegram\build\prepare\win.bat silent
+          call %REPO_NAME%\Telegram\build\prepare\win.bat silent qt6
           cd %TBUILD%\%REPO_NAME%\Telegram
 
           call configure.bat ^
           %TDESKTOP_BUILD_ARCH% ^
+          qt6 ^
           %TDESKTOP_BUILD_API% ^
           -D CMAKE_C_FLAGS="/WX /O2 /Gw /Zc:inline /Oy /Gy /cgthreads2 /DNDEBUG" ^
           -D CMAKE_CXX_FLAGS="/WX /O2 /Gw /Zc:inline /Oy /Gy /cgthreads2 /DNDEBUG" ^
@@ -313,7 +320,7 @@ jobs:
             !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\**\*.pdb
             !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\**\*.ilk
             !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\**\*.exp
-          key: ${{ runner.OS }}-x64-desktop-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ${{ runner.OS }}-x64-qt6-desktop-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
 
   prune-old-actions:
     name: Prune Old Actions

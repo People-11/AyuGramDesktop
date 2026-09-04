@@ -1639,7 +1639,9 @@ win:
 
     SET CONFIGURATIONS=-debug
 release:
-    SET CONFIGURATIONS=-debug-and-release
+    # Only release libraries are ever linked, see qt_lib_suffix in
+    # cmake/external/qt/CMakeLists.txt, and a debug Qt doubles the build.
+    SET CONFIGURATIONS=-release
 win:
     """ + removeDir('"%LIBS_DIR%\\Qt' + qt + '"') + """
     SET MOZJPEG_DIR=%LIBS_DIR%\\mozjpeg
@@ -1686,8 +1688,6 @@ win:
         -D LCMS2_INCLUDE_DIR="%LCMS2_DIR%\\include" ^
         -D LCMS2_LIBRARIES="%LCMS2_DIR%\\out\\Release\\src\\liblcms2.a"
 
-    cmake --build . --config MinSizeRel --parallel
-    cmake --install . --config MinSizeRel
     cmake --build . --parallel
     cmake --install .
 """)

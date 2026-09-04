@@ -103,6 +103,12 @@ PRIVATE
 
 if (WIN32)
     target_link_libraries(Telegram PRIVATE windowsapp)
+    if (QT_VERSION GREATER 6)
+        # Qt6Network calls DnsQueryEx and friends directly, where Qt 5
+        # resolved them at runtime. Belongs next to the other Qt 6 system
+        # libraries in cmake/external/qt, but that is a submodule.
+        target_link_libraries(Telegram PRIVATE Dnsapi)
+    endif()
 endif()
 
 set(ayugram_files
