@@ -140,6 +140,7 @@ protected:
 		Loaded,
 	};
 
+	void decodeImageAndFinish();
 	void readImage(int progressiveSizeLimit) const;
 
 	bool checkForOpen();

@@ -157,6 +157,30 @@ QImage FileLoader::imageData(int progressiveSizeLimit) const {
 	return _imageData;
 }
 
+void FileLoader::decodeImageAndFinish() {
+	crl::async([
+		this,
+		weak = base::make_weak(this),
+		bytes = _data
+	]() mutable {
+		auto read = Images::Read({ .content = bytes });
+		crl::on_main(weak, [
+			this,
+			image = std::move(read.image),
+			format = std::move(read.format)
+		]() mutable {
+			if (!image.isNull()) {
+				_imageFormat = format;
+				_imageData = std::move(image);
+			}
+			// NB! fire_done() can leave us in ~FileLoader() already.
+			const auto session = _session;
+			_updates.fire_done();
+			session->notifyDownloaderTaskFinished();
+		});
+	});
+}
+
 void FileLoader::readImage(int progressiveSizeLimit) const {
 	const auto buffer = progressiveSizeLimit
 		? QByteArray::fromRawData(_data.data(), progressiveSizeLimit)
@@ -466,6 +490,16 @@ bool FileLoader::finalizeResult() {
 						: ("partial:" + _data)),
 					_cacheTag));
 		}
+	}
+	if (_imageData.isNull()
+		&& _locationType == UnknownFileLocation
+		&& !_data.isEmpty()) {
+		// Consumers read imageData() from the done handler, so decoding
+		// happens right inside the MTP response handler. loadLocal()
+		// already decodes off the main thread, do the same here and
+		// finish once the image is ready.
+		decodeImageAndFinish();
+		return true;
 	}
 	const auto session = _session;
 	_updates.fire_done();
