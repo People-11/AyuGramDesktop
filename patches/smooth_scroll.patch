@@ -362,3 +362,17 @@ diff --git a/ui/rp_widget.cpp b/ui/rp_widget.cpp
 +#endif // Q_OS_WIN
  #ifdef DESKTOP_APP_USE_ANGLE
  		format.setRedBufferSize(8);
+diff --git a/ui/widgets/rp_window.cpp b/ui/widgets/rp_window.cpp
+--- a/ui/widgets/rp_window.cpp
++++ b/ui/widgets/rp_window.cpp
+@@ -29,7 +29,9 @@ RpWindow::RpWindow(bool translucent, QWidget *parent)
+ 	if (translucent) {
+ 		setAttribute(Qt::WA_NoSystemBackground, true);
+ 		setAttribute(Qt::WA_TranslucentBackground, true);
++	} else {
++		// An RHI backing store has no per-pixel window alpha on Windows.
++		GL::EnsureWindowRhi(this);
+ 	}
+-	GL::EnsureWindowRhi(this);
+ 	return Platform::CreateWindowHelper(this);
+ }()) {
