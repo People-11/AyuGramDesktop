@@ -43,6 +43,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/rect.h"
 #include "ui/power_saving.h"
 #include "ui/cached_round_corners.h"
+#include "ui/gl/gl_detection.h"
 #include "ui/gl/gl_window.h"
 #include "ui/boxes/confirm_box.h"
 #include "ui/ui_utility.h"
@@ -651,8 +652,24 @@ OverlayWidget::PipWrap::PipWrap(
 	std::move(destroy)) {
 }
 
+// ChooseBackendDefault takes QRhi whenever it is supported, ignoring
+// Capabilities::transparency. On Windows a QRhi swap chain has no per-pixel
+// window alpha, so a translucent window leaks the DWM glass behind it.
+[[nodiscard]] Ui::GL::Backend ChooseTranslucentBackend(
+		Ui::GL::Capabilities capabilities) {
+	const auto backend = Ui::GL::ChooseBackendDefault(capabilities);
+	if (!::Platform::IsWindows() || backend != Ui::GL::Backend::QRhi) {
+		return backend;
+	}
+	return capabilities.supported
+		? Ui::GL::Backend::OpenGL
+		: Ui::GL::Backend::Raster;
+}
+
 OverlayWidget::OverlayWidget()
-: _wrap(std::make_unique<Ui::GL::Window>(Ui::GL::Window::Translucent::Yes))
+: _wrap(std::make_unique<Ui::GL::Window>(
+	ChooseTranslucentBackend,
+	Ui::GL::Window::Translucent::Yes))
 , _window(_wrap->window())
 , _helper(Platform::CreateOverlayWidgetHelper(_window.get(), [=](bool maximized) {
 	toggleFullScreen(maximized);
