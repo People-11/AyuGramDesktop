@@ -12,6 +12,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "boxes/abstract_box.h"
 #include "boxes/premium_limits_box.h"
 #include "lang/lang_keys.h"
+#include "ayu/ayu_settings.h"
 #include "storage/localimageloader.h"
 #include "storage/file_download.h"
 #include "storage/storage_folder_archive.h"
@@ -147,6 +148,11 @@ Uploader::Entry::Entry(
 
 void Uploader::Entry::setDocSize(int64 size) {
 	docSize = size;
+	if (AyuSettings::getInstance().uploadBoost()
+		&& setPartSize(kDocumentUploadPartSize4)) {
+		// 512kb is the largest part size the protocol allows.
+		return;
+	}
 	constexpr auto limit0 = 1024 * 1024;
 	constexpr auto limit1 = 32 * limit0;
 	if (docSize >= limit0 || !setPartSize(kDocumentUploadPartSize0)) {
