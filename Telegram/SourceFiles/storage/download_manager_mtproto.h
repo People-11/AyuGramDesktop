@@ -19,11 +19,16 @@ class Error;
 
 namespace Storage {
 
-// Different part sizes are not supported for now :(
-// Because we start downloading with some part size
-// and then we get a CDN-redirect where we support only
-// fixed part size download for hash checking.
+// The base part size, also the unit the session windows are measured in.
+// Streaming and preloading always use it, because their cache slices are
+// serialized in parts of exactly this size.
 constexpr auto kDownloadPartSize = 128 * 1024;
+
+// Part size to use according to the AyuGram download boost setting.
+[[nodiscard]] int ConfiguredDownloadPartSize();
+
+// Same, but only for whole files large enough to gain anything from it.
+[[nodiscard]] int ChooseDownloadPartSize(int64 loadSize, int64 fullSize);
 
 class DownloadMtprotoTask;
 
@@ -53,7 +58,8 @@ public:
 		MTP::DcId dcId,
 		int index,
 		int amountAtRequestStart,
-		crl::time timeAtRequestStart);
+		crl::time timeAtRequestStart,
+		int partSize);
 	void checkSendNextAfterSuccess(MTP::DcId dcId);
 	[[nodiscard]] int chooseSessionIndex(MTP::DcId dcId) const;
 
@@ -142,7 +148,8 @@ public:
 	DownloadMtprotoTask(
 		not_null<DownloadManagerMtproto*> owner,
 		const StorageFileLocation &location,
-		Data::FileOrigin origin);
+		Data::FileOrigin origin,
+		int partSize = kDownloadPartSize);
 	DownloadMtprotoTask(
 		not_null<DownloadManagerMtproto*> owner,
 		MTP::DcId dcId,
@@ -164,6 +171,13 @@ public:
 		const QByteArray &current);
 
 protected:
+	// Fixed for the whole lifetime of the task: request offsets are
+	// stepped by it and the requested amounts are accounted with it,
+	// including from the destructor.
+	[[nodiscard]] int partSize() const {
+		return _partSize;
+	}
+
 	[[nodiscard]] bool haveSentRequests() const;
 	[[nodiscard]] bool haveSentRequestForOffset(int64 offset) const;
 	void cancelAllRequests();
@@ -265,6 +279,7 @@ private:
 
 	const not_null<DownloadManagerMtproto*> _owner;
 	const MTP::DcId _dcId = 0;
+	const int _partSize = kDownloadPartSize;
 
 	// _location can be changed with an updated file_reference.
 	Location _location;

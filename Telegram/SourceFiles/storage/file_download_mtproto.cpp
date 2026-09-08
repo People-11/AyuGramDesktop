@@ -38,7 +38,11 @@ mtpFileLoader::mtpFileLoader(
 	fromCloud,
 	autoLoading,
 	cacheTag)
-, DownloadMtprotoTask(&session->downloader(), location, origin) {
+, DownloadMtprotoTask(
+	&session->downloader(),
+	location,
+	origin,
+	Storage::ChooseDownloadPartSize(loadSize, fullSize)) {
 }
 
 mtpFileLoader::mtpFileLoader(
@@ -138,7 +142,7 @@ int64 mtpFileLoader::takeNextRequestOffset() {
 	Expects(readyToRequest());
 
 	const auto result = _nextRequestOffset;
-	_nextRequestOffset += Storage::kDownloadPartSize;
+	_nextRequestOffset += partSize();
 	return result;
 }
 
@@ -188,8 +192,8 @@ void mtpFileLoader::startLoadingWithPartial(const QByteArray &data) {
 	Expects(data.startsWith("partial:"));
 
 	constexpr auto kPrefix = 8;
-	const auto parts = (data.size() - kPrefix) / Storage::kDownloadPartSize;
-	const auto use = parts * int64(Storage::kDownloadPartSize);
+	const auto parts = (data.size() - kPrefix) / partSize();
+	const auto use = parts * int64(partSize());
 	if (use > 0) {
 		_nextRequestOffset = use;
 		feedPart(0, QByteArray::fromRawData(data.data() + kPrefix, use));
