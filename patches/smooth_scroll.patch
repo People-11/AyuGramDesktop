@@ -1,14 +1,20 @@
 diff --git a/ui/effects/animations.cpp b/ui/effects/animations.cpp
+index bb268d6..bb398c1 100644
 --- a/ui/effects/animations.cpp
 +++ b/ui/effects/animations.cpp
-@@ -26,2 +26,6 @@ namespace {
-+#ifdef Q_OS_WIN
-+constexpr auto kAnimationTick = crl::time(2);
-+#else
+@@ -24,10 +24,24 @@ namespace Animations {
+ namespace {
+ 
  constexpr auto kAnimationTick = crl::time(1000) / st::universalDuration;
-+#endif // Q_OS_WIN
++#ifdef Q_OS_WIN
++// Animations are driven by the frame's update request. The tick timer is
++// only a fallback, and must not bump _lastUpdateTime often enough to make
++// this filter drop the evaluation the next frame is about to paint.
++constexpr auto kIgnoreUpdatesTimeout = crl::time(1);
++#else // Q_OS_WIN
  constexpr auto kIgnoreUpdatesTimeout = crl::time(4);
-@@ -29,4 +29,11 @@ namespace {
++#endif // Q_OS_WIN
+ 
  Manager *ManagerInstance = nullptr;
  bool ScheduleWithInvokeQueued = false;
 +Fn<crl::time()> FrameTimeGetter;
@@ -20,7 +26,8 @@ diff --git a/ui/effects/animations.cpp b/ui/effects/animations.cpp
 +}
  
  } // namespace
-@@ -52,7 +63,7 @@ void Basic::restart() {
+ 
+@@ -52,7 +66,7 @@ void Basic::stop() {
  void Basic::restart() {
  	Expects(_started >= 0);
  
@@ -29,7 +36,7 @@ diff --git a/ui/effects/animations.cpp b/ui/effects/animations.cpp
  
  	Ensures(_started >= 0);
  }
-@@ -60,7 +71,7 @@ void Basic::markStarted() {
+@@ -60,7 +74,7 @@ void Basic::restart() {
  void Basic::markStarted() {
  	Expects(_started < 0);
  
@@ -38,7 +45,9 @@ diff --git a/ui/effects/animations.cpp b/ui/effects/animations.cpp
  
  	Ensures(_started >= 0);
  }
-@@ -129,13 +140,17 @@ void Manager::update() {
+@@ -127,6 +141,10 @@ void Manager::update() {
+ 		return;
+ 	}
  	const auto now = crl::now();
 +
 +	// Positions use the frame clock, scheduling keeps the wall clock.
@@ -47,18 +56,16 @@ diff --git a/ui/effects/animations.cpp b/ui/effects/animations.cpp
  	if (_forceImmediateUpdate) {
  		_forceImmediateUpdate = false;
  	}
- 	schedule();
- 
- 	_updating = true;
- 	const auto guard = gsl::finally([&] { _updating = false; });
+@@ -137,7 +155,7 @@ void Manager::update() {
  
  	_lastUpdateTime = now;
  	const auto isFinished = [&](const ActiveBasicPointer &element) {
 -		return !element.call(now);
 +		return !element.call(frame);
  	};
-@@ -217,6 +232,10 @@ void Manager::SetScheduleWithInvokeQueued(bool value) {
- void Manager::SetScheduleWithInvokeQueued(bool value) {
+ 	_active.erase(ranges::remove_if(_active, isFinished), end(_active));
+ 
+@@ -218,5 +236,9 @@ void Manager::SetScheduleWithInvokeQueued(bool value) {
  	ScheduleWithInvokeQueued = value;
  }
  
@@ -69,10 +76,10 @@ diff --git a/ui/effects/animations.cpp b/ui/effects/animations.cpp
  } // namespace Animations
  } // namespace Ui
 diff --git a/ui/effects/animations.h b/ui/effects/animations.h
+index 254bab9..ccb2e00 100644
 --- a/ui/effects/animations.h
 +++ b/ui/effects/animations.h
-@@ -150,5 +150,9 @@ public:
- 	void update();
+@@ -151,6 +151,10 @@ public:
  
  	static void SetScheduleWithInvokeQueued(bool value);
  
@@ -81,8 +88,42 @@ diff --git a/ui/effects/animations.h b/ui/effects/animations.h
 +	static void SetFrameTimeGetter(Fn<crl::time()> getter);
 +
  private:
+ 	class ActiveBasicPointer {
+ 	public:
+diff --git a/ui/gl/gl_detection.cpp b/ui/gl/gl_detection.cpp
+index 0d54442..42fc4c5 100644
+--- a/ui/gl/gl_detection.cpp
++++ b/ui/gl/gl_detection.cpp
+@@ -63,8 +63,8 @@ base::options::toggle OptionUseQtRhi({
+ 	.description = "Render the main window on the GPU instead of the CPU.",
+ 	.defaultValue = true,
+ 	.scope = [] {
+-		return (!Platform::IsWindows() || Platform::IsWindowsARM64())
+-			&& QLibraryInfo::version() >= QVersionNumber(6, 7);
++		// Windows x64 was excluded only because those builds were Qt 5.
++		return QLibraryInfo::version() >= QVersionNumber(6, 7);
+ 	},
+ 	.restartRequired = true,
+ });
+diff --git a/ui/rp_widget.cpp b/ui/rp_widget.cpp
+index 738b60a..4450a7f 100644
+--- a/ui/rp_widget.cpp
++++ b/ui/rp_widget.cpp
+@@ -342,7 +342,12 @@ RpWidget::RpWidget(QWidget *parent)
+ : RpWidgetBase<QWidget>(parent) {
+ 	[[maybe_unused]] static const auto Once = [] {
+ 		auto format = QSurfaceFormat::defaultFormat();
++#ifdef Q_OS_WIN
++		// The RHI swap chain is what paces presentation now.
++		format.setSwapInterval(1);
++#else // Q_OS_WIN
+ 		format.setSwapInterval(::Platform::MetalSupported() ? 1 : 0);
++#endif // Q_OS_WIN
+ #ifdef DESKTOP_APP_USE_ANGLE
+ 		format.setRedBufferSize(8);
+ 		format.setGreenBufferSize(8);
 diff --git a/ui/widgets/elastic_scroll.cpp b/ui/widgets/elastic_scroll.cpp
-index 7fb2939..eaa7c5c 100644
+index 7fb2939..71f11a4 100644
 --- a/ui/widgets/elastic_scroll.cpp
 +++ b/ui/widgets/elastic_scroll.cpp
 @@ -420,9 +420,16 @@ ElasticScroll::ElasticScroll(
@@ -156,7 +197,7 @@ index 7fb2939..eaa7c5c 100644
  		_touchPreviousPosition = _touchPosition;
  		_touchPosition = e->touchPoints().cbegin()->screenPos().toPoint();
 diff --git a/ui/widgets/elastic_scroll.h b/ui/widgets/elastic_scroll.h
-index 9352c4b..ce55a6f 100644
+index 9352c4b..5256ae6 100644
 --- a/ui/widgets/elastic_scroll.h
 +++ b/ui/widgets/elastic_scroll.h
 @@ -334,6 +334,7 @@ private:
@@ -167,8 +208,24 @@ index 9352c4b..ce55a6f 100644
  
  	base::Timer _touchTimer;
  	base::Timer _touchScrollTimer;
+diff --git a/ui/widgets/rp_window.cpp b/ui/widgets/rp_window.cpp
+index 11cf071..103374f 100644
+--- a/ui/widgets/rp_window.cpp
++++ b/ui/widgets/rp_window.cpp
+@@ -29,8 +29,10 @@ RpWindow::RpWindow(bool translucent, QWidget *parent)
+ 	if (translucent) {
+ 		setAttribute(Qt::WA_NoSystemBackground, true);
+ 		setAttribute(Qt::WA_TranslucentBackground, true);
++	} else {
++		// An RHI backing store has no per-pixel window alpha on Windows.
++		GL::EnsureWindowRhi(this);
+ 	}
+-	GL::EnsureWindowRhi(this);
+ 	return Platform::CreateWindowHelper(this);
+ }()) {
+ 	Expects(_helper != nullptr);
 diff --git a/ui/widgets/scroll_area.cpp b/ui/widgets/scroll_area.cpp
-index 03dc8c4..cfca744 100644
+index 03dc8c4..b4ed537 100644
 --- a/ui/widgets/scroll_area.cpp
 +++ b/ui/widgets/scroll_area.cpp
 @@ -26,6 +26,8 @@
@@ -180,7 +237,7 @@ index 03dc8c4..cfca744 100644
  base::options::toggle OptionQScroller({
  	.id = kOptionQScroller,
  	.name = "Use QScroller for touchpad scrolling",
-@@ -74,4 +76,49 @@ base::options::toggle OptionQScroller({
+@@ -74,6 +76,51 @@ base::options::toggle OptionQScroller({
  
  const char kOptionQScroller[] = "qscroller";
  
@@ -230,6 +287,8 @@ index 03dc8c4..cfca744 100644
 +}
 +
  void SetupScrollerPhysics(not_null<QScroller*> scroller) {
+ 	// Qt animates QScroller kinetic scrolling at fixed 16 ms / ~60 fps,
+ 	// so the inertia feels laggy on high refresh rate displays. Override
 @@ -590,6 +637,20 @@ ScrollArea::ScrollArea(
  		_touchScrollTimer.setCallback([=] { touchScrollTimer(); });
  	}
@@ -292,7 +351,7 @@ index 03dc8c4..cfca744 100644
  }
  
 diff --git a/ui/widgets/scroll_area.h b/ui/widgets/scroll_area.h
-index 7291e1d..bdb0b07 100644
+index 7291e1d..97114a6 100644
 --- a/ui/widgets/scroll_area.h
 +++ b/ui/widgets/scroll_area.h
 @@ -49,6 +49,25 @@ struct ScrollToRequest {
@@ -329,50 +388,3 @@ index 7291e1d..bdb0b07 100644
  
  	bool _touchEnabled = false;
  	base::Timer _touchTimer;
-diff --git a/ui/gl/gl_detection.cpp b/ui/gl/gl_detection.cpp
---- a/ui/gl/gl_detection.cpp
-+++ b/ui/gl/gl_detection.cpp
-@@ -59,11 +59,11 @@ bool LastCheckCrashed/* = false*/;
- base::options::toggle OptionUseQtRhi({
- 	.id = kOptionUseQtRhi,
- 	.name = "Use Qt RHI renderer",
- 	.description = "Render the main window on the GPU instead of the CPU.",
- 	.defaultValue = true,
- 	.scope = [] {
--		return (!Platform::IsWindows() || Platform::IsWindowsARM64())
--			&& QLibraryInfo::version() >= QVersionNumber(6, 7);
-+		// Windows x64 was excluded only because those builds were Qt 5.
-+		return QLibraryInfo::version() >= QVersionNumber(6, 7);
- 	},
- 	.restartRequired = true,
- });
-diff --git a/ui/rp_widget.cpp b/ui/rp_widget.cpp
---- a/ui/rp_widget.cpp
-+++ b/ui/rp_widget.cpp
-@@ -341,6 +341,11 @@ RpWidget::RpWidget(QWidget *parent)
- RpWidget::RpWidget(QWidget *parent)
- : RpWidgetBase<QWidget>(parent) {
- 	[[maybe_unused]] static const auto Once = [] {
- 		auto format = QSurfaceFormat::defaultFormat();
-+#ifdef Q_OS_WIN
-+		// The RHI swap chain is what paces presentation now.
-+		format.setSwapInterval(1);
-+#else // Q_OS_WIN
- 		format.setSwapInterval(::Platform::MetalSupported() ? 1 : 0);
-+#endif // Q_OS_WIN
- #ifdef DESKTOP_APP_USE_ANGLE
- 		format.setRedBufferSize(8);
-diff --git a/ui/widgets/rp_window.cpp b/ui/widgets/rp_window.cpp
---- a/ui/widgets/rp_window.cpp
-+++ b/ui/widgets/rp_window.cpp
-@@ -29,7 +29,9 @@ RpWindow::RpWindow(bool translucent, QWidget *parent)
- 	if (translucent) {
- 		setAttribute(Qt::WA_NoSystemBackground, true);
- 		setAttribute(Qt::WA_TranslucentBackground, true);
-+	} else {
-+		// An RHI backing store has no per-pixel window alpha on Windows.
-+		GL::EnsureWindowRhi(this);
- 	}
--	GL::EnsureWindowRhi(this);
- 	return Platform::CreateWindowHelper(this);
- }()) {
