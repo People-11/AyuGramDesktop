@@ -6,6 +6,7 @@ For license and copyright information please follow this link:
 https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "history/view/media/history_view_photo.h"
+#include "core/stall_probe.h"
 
 #include "boxes/send_credits_box.h"
 #include "history/history_item_components.h"
@@ -504,6 +505,7 @@ void Photo::drawSpoilerTag(
 }
 
 void Photo::validateUserpicImageCache(QSize size, bool forum) const {
+	PROBE_SCOPE("Photo::validateUserpicImageCache");
 	const auto forumValue = forum ? 1 : 0;
 	const auto large = _dataMedia->image(PhotoSize::Large);
 	const auto ratio = style::DevicePixelRatio();
@@ -554,6 +556,7 @@ void Photo::validateUserpicImageCache(QSize size, bool forum) const {
 void Photo::validateImageCache(
 		QSize outer,
 		std::optional<Ui::BubbleRounding> rounding) const {
+	PROBE_SCOPE("Photo::validateImageCache");
 	const auto large = _dataMedia->image(PhotoSize::Large);
 	const auto ratio = style::DevicePixelRatio();
 	const auto scaled = ScaledInstantViewMediaSize(
@@ -982,6 +985,7 @@ void Photo::validateGroupedCache(
 		Ui::BubbleRounding rounding,
 		not_null<uint64*> cacheKey,
 		not_null<QPixmap*> cache) const {
+	PROBE_SCOPE("Photo::validateGroupedCache");
 	using Option = Images::Option;
 
 	ensureDataMediaCreated();

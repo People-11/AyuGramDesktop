@@ -22,6 +22,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "core/local_url_handlers.h"
 #include "core/update_checker.h"
 #include "core/deadlock_detector.h"
+#include "core/stall_probe.h"
+
+#include <optional>
+#include <typeinfo>
 #include "base/timer.h"
 #include "base/concurrent_timer.h"
 #include "base/invoke_queued.h"
@@ -57,6 +61,35 @@ base::options::toggle OptionDeadlockDetector({
 constexpr auto kCleanupIpcTimeout = 10 * crl::time(1000);
 constexpr auto kCleanupQuitTimeout = 30 * crl::time(1000);
 
+// Static storage, so Probe can key its table on the pointer.
+[[nodiscard]] const char *ProbeEventName(QEvent::Type type) {
+	switch (type) {
+	case QEvent::Timer: return "event/Timer";
+	case QEvent::MetaCall: return "event/MetaCall";
+	case QEvent::Paint: return "event/Paint";
+	case QEvent::UpdateRequest: return "event/UpdateRequest";
+	case QEvent::UpdateLater: return "event/UpdateLater";
+	case QEvent::PolishRequest: return "event/PolishRequest";
+	case QEvent::MouseMove: return "event/MouseMove";
+	case QEvent::MouseButtonPress: return "event/MousePress";
+	case QEvent::MouseButtonRelease: return "event/MouseRelease";
+	case QEvent::Wheel: return "event/Wheel";
+	case QEvent::KeyPress: return "event/KeyPress";
+	case QEvent::KeyRelease: return "event/KeyRelease";
+	case QEvent::Resize: return "event/Resize";
+	case QEvent::Move: return "event/Move";
+	case QEvent::Show: return "event/Show";
+	case QEvent::Hide: return "event/Hide";
+	case QEvent::Enter: return "event/Enter";
+	case QEvent::Leave: return "event/Leave";
+	case QEvent::DeferredDelete: return "event/DeferredDelete";
+	case QEvent::ChildAdded: return "event/ChildAdded";
+	case QEvent::LayoutRequest: return "event/LayoutRequest";
+	case QEvent::TouchUpdate: return "event/TouchUpdate";
+	}
+	return "event/other";
+}
+
 } // namespace
 
 const char kOptionDeadlockDetector[] = "deadlock-detector";
@@ -80,6 +113,7 @@ Sandbox::Sandbox(int &argc, char **argv)
 }
 
 int Sandbox::start() {
+	Probe::Init();
 	{
 		const auto d = QFile::encodeName(QDir(cWorkingDir()).absolutePath());
 		char h[33] = { 0 };
@@ -663,6 +697,14 @@ void Sandbox::registerEnterFromEventLoop() {
 bool Sandbox::notify(QObject *receiver, QEvent *e) {
 	if (QThread::currentThreadId() != _mainThreadId) {
 		return QApplication::notify(receiver, e);
+	}
+
+	auto probe = std::optional<Probe::Scope>();
+	if (Probe::Events()) {
+		const auto type = ProbeEventName(e->type());
+		const auto klass = typeid(*receiver).name();
+		probe.emplace(Probe::KeyByClass() ? klass : type);
+		Probe::Detail(Probe::KeyByClass() ? type : klass);
 	}
 
 	const auto wrap = createEventNestingLevel();

@@ -6,6 +6,7 @@ For license and copyright information please follow this link:
 https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "history/view/media/history_view_gif.h"
+#include "core/stall_probe.h"
 
 #include "apiwrap.h"
 #include "api/api_transcribes.h"
@@ -1214,6 +1215,7 @@ void Gif::validateThumbCache(
 		QSize outer,
 		bool isEllipse,
 		std::optional<Ui::BubbleRounding> rounding) const {
+	PROBE_SCOPE("Gif::validateThumbCache");
 	const auto good = _videoCoverMedia
 		? _videoCoverMedia->image(Data::PhotoSize::Large)
 		: _dataMedia->goodThumbnail();
@@ -2160,6 +2162,7 @@ void Gif::validateGroupedCache(
 		Ui::BubbleRounding rounding,
 		not_null<uint64*> cacheKey,
 		not_null<QPixmap*> cache) const {
+	PROBE_SCOPE("Gif::validateGroupedCache");
 	using Option = Images::Option;
 
 	ensureDataMediaCreated();

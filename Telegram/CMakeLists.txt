@@ -746,6 +746,8 @@ PRIVATE
     core/sandbox.h
     core/shortcuts.cpp
     core/shortcuts.h
+    core/stall_probe.cpp
+    core/stall_probe.h
     core/ui_integration.cpp
     core/ui_integration.h
     core/update_checker.cpp

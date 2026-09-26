@@ -6,6 +6,7 @@ For license and copyright information please follow this link:
 https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "history/view/history_view_list_widget.h"
+#include "core/stall_probe.h"
 
 #include "base/unixtime.h"
 #include "base/qt/qt_key_modifiers.h"
@@ -2608,6 +2609,7 @@ void ListWidget::checkActivation() {
 }
 
 void ListWidget::paintEvent(QPaintEvent *e) {
+	PROBE_SCOPE("HistoryView::ListWidget::paintEvent");
 	const auto overlapped = _delegate->listIgnorePaintEvent(this, e);
 	if (_readMetricsTracker) {
 		_readMetricsTracker->setScreenActive(

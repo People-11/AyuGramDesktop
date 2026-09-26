@@ -6,6 +6,7 @@ For license and copyright information please follow this link:
 https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "info/media/info_media_list_widget.h"
+#include "core/stall_probe.h"
 
 #include "info/global_media/info_global_media_provider.h"
 #include "info/media/info_media_common.h"
@@ -1047,6 +1048,7 @@ bool ListWidget::eventHook(QEvent *e) {
 }
 
 void ListWidget::paintEvent(QPaintEvent *e) {
+	PROBE_SCOPE("Info::Media::ListWidget::paintEvent");
 	Painter p(this);
 
 	if (_zoom->paint(p)) {

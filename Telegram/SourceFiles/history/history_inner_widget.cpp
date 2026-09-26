@@ -6,6 +6,7 @@ For license and copyright information please follow this link:
 https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "history/history_inner_widget.h"
+#include "core/stall_probe.h"
 
 #include "api/api_polls.h"
 #include "chat_helpers/stickers_emoji_pack.h"
@@ -1466,6 +1467,7 @@ void HistoryInner::startEffectOnRead(not_null<HistoryItem*> item) {
 }
 
 void HistoryInner::paintEvent(QPaintEvent *e) {
+	PROBE_SCOPE("HistoryInner::paintEvent");
 	const auto overlapped = _controller->contentOverlapped(this, e);
 	const auto pendingResized = hasPendingResizedItems();
 	_readMetricsTracker->setScreenActive(!overlapped

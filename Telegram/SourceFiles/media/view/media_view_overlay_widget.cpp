@@ -6,6 +6,7 @@ For license and copyright information please follow this link:
 https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "media/view/media_view_overlay_widget.h"
+#include "core/stall_probe.h"
 
 #include "apiwrap.h"
 #include "api/api_attached_stickers.h"
@@ -6200,6 +6201,7 @@ Ui::GL::ChosenRenderer OverlayWidget::chooseRenderer(
 }
 
 void OverlayWidget::paint(not_null<Renderer*> renderer) {
+	PROBE_SCOPE("OverlayWidget::paint");
 	renderer->paintBackground();
 	if (contentShown()) {
 		if (videoShown()) {
