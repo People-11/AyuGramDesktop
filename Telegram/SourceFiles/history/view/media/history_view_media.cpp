@@ -721,7 +721,7 @@ bool GroupedCacheWorker::validate(
 				_pendingKey = 0;
 				_ready = std::move(result);
 				_readyKey = key;
-				strong->repaint();
+				strong->parent()->repaint();
 			});
 		});
 	}
