@@ -254,6 +254,7 @@ private:
 		int topAdded = 0;
 	} _ephemeral;
 	mutable QImage _thumbCache;
+	mutable GroupedCacheWorker _groupedWorker;
 	mutable QImage _roundingMask;
 	mutable crl::time _videoPosition = 0;
 	std::shared_ptr<VoiceSeekClickHandler> _seekl;

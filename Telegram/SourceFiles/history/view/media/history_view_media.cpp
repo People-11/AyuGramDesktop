@@ -31,6 +31,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/painter.h"
 #include "ui/power_saving.h"
 #include "ui/text/text_utilities.h"
+#include "ui/ui_utility.h"
 #include "core/ui_integration.h"
 #include "styles/style_chat.h"
 #include "styles/style_chat_helpers.h"
@@ -655,6 +656,89 @@ Images::CornersMaskRef MediaRoundingMask(
 	}
 	return result;
 
+}
+
+bool GroupedCacheWorker::validate(
+		not_null<const Media*> owner,
+		uint64 key,
+		not_null<uint64*> cacheKey,
+		not_null<QPixmap*> cache,
+		QImage source,
+		QImage tiny,
+		QSize size,
+		QSize outer,
+		bool blurred,
+		Ui::BubbleRounding rounding) {
+	if (_readyKey == key) {
+		*cacheKey = key;
+		*cache = Ui::PixmapFromImage(base::take(_ready));
+		_readyKey = 0;
+		return true;
+	} else if (cache->isNull() && tiny.isNull()) {
+		return false;
+	}
+	// One worker at a time: while resizing the key changes every frame. A
+	// result that is stale by the time it lands still repaints, and that
+	// paint starts the worker for the current key.
+	if (!_pendingKey) {
+		_pendingKey = key;
+
+		// The cached corner masks belong to the main thread, so the worker
+		// gets its own references to them.
+		const auto ref = MediaRoundingMask(rounding);
+		auto masks = std::array<QImage, 4>();
+		for (auto i = 0; i != 4; ++i) {
+			if (ref.p[i]) {
+				masks[i] = *ref.p[i];
+			}
+		}
+		const auto weak = base::make_weak(owner.get());
+		crl::async([=, source = std::move(source)]() mutable {
+			auto mask = Images::CornersMaskRef();
+			for (auto i = 0; i != 4; ++i) {
+				if (!masks[i].isNull()) {
+					mask.p[i] = &masks[i];
+				}
+			}
+			auto result = Images::Round(
+				Images::Prepare(
+					std::move(source),
+					size,
+					{
+						.options = (blurred
+							? Images::Option::Blur
+							: Images::Option()),
+						.outer = outer,
+					}),
+				mask);
+			crl::on_main([=, result = std::move(result)]() mutable {
+				// We are a member of owner, so check it before touching us.
+				// A cleared worker has no pending key, drop its result then.
+				const auto strong = weak.get();
+				if (!strong || _pendingKey != key) {
+					return;
+				}
+				_pendingKey = 0;
+				_ready = std::move(result);
+				_readyKey = key;
+				strong->repaint();
+			});
+		});
+	}
+	if (cache->isNull()) {
+		*cache = Ui::PixmapFromImage(Images::Round(
+			Images::Prepare(
+				std::move(tiny),
+				size,
+				{ .options = Images::Option::Blur, .outer = outer }),
+			MediaRoundingMask(rounding)));
+	}
+	return true;
+}
+
+void GroupedCacheWorker::clear() {
+	_ready = QImage();
+	_readyKey = _pendingKey = 0;
 }
 
 } // namespace HistoryView

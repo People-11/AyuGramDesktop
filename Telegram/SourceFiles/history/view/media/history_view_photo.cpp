@@ -210,6 +210,7 @@ void Photo::unloadHeavyPart() {
 		_spoiler->animation = nullptr;
 	}
 	_imageCache = QImage();
+	_groupedWorker.clear();
 	togglePollingStory(false);
 }
 
@@ -1026,6 +1027,25 @@ void Photo::validateGroupedCache(
 		: _dataMedia->thumbnailInline()
 		? _dataMedia->thumbnailInline()
 		: Image::BlankMedia().get();
+
+	// Anything but the inline thumbnail can be full size, including the
+	// smaller sizes of a progressive photo, decoded from the same bytes.
+	const auto tiny = _dataMedia->thumbnailInline();
+	if (image != tiny
+		&& image != Image::BlankMedia().get()
+		&& _groupedWorker.validate(
+			this,
+			key,
+			cacheKey,
+			cache,
+			image->original(),
+			tiny ? tiny->original() : QImage(),
+			pixSize * ratio,
+			{ width, height },
+			!loaded,
+			rounding)) {
+		return;
+	}
 
 	*cacheKey = key;
 	auto prepared = Images::Prepare(
