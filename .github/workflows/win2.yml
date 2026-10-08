@@ -1,0 +1,367 @@
+name: Windows.
+
+on:
+  workflow_dispatch:
+  push:
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - 'changelog.txt'
+      - 'LEGAL'
+      - 'LICENSE'
+      - '.github/**'
+      - '!.github/workflows/win2.yml'
+      - 'lib/xdg/**'
+      - 'snap/**'
+      - 'Telegram/build/docker/**'
+      - 'Telegram/Resources/uwp/**'
+      - 'Telegram/SourceFiles/platform/linux/**'
+      - 'Telegram/SourceFiles/platform/mac/**'
+      - 'Telegram/Telegram/**'
+      - 'Telegram/configure.sh'
+      - 'Telegram/Telegram.plist'
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - 'changelog.txt'
+      - 'LEGAL'
+      - 'LICENSE'
+      - '.github/**'
+      - '!.github/workflows/win2.yml'
+      - 'lib/xdg/**'
+      - 'snap/**'
+      - 'Telegram/build/docker/**'
+      - 'Telegram/Resources/uwp/**'
+      - 'Telegram/SourceFiles/platform/linux/**'
+      - 'Telegram/SourceFiles/platform/mac/**'
+      - 'Telegram/Telegram/**'
+      - 'Telegram/configure.sh'
+      - 'Telegram/Telegram.plist'
+
+jobs:
+
+  build-libraries:
+    name: Build Libraries
+    runs-on: windows-2022
+
+    env:
+      TBUILD: ${{ github.workspace }}\TBuild
+      REPO_NAME: ${{ github.event.repository.name }}
+
+    outputs:
+      cache-key: ${{ env.CACHE_KEY }}
+
+    defaults:
+      run:
+        shell: cmd
+
+    steps:
+      - name: Prepare directories
+        run: |
+          mkdir %userprofile%\TBuild\Libraries
+          mklink /d %TBUILD% %userprofile%\TBuild
+
+      - name: Clone
+        uses: actions/checkout@v4
+        with:
+          path: ${{ env.TBUILD }}\${{ env.REPO_NAME }}
+          sparse-checkout: Telegram/build
+
+      - name: Calculate cache key
+        shell: bash
+        run: |
+          cd "$TBUILD/$REPO_NAME"
+          sha256sum \
+            Telegram/build/prepare/prepare.py \
+            Telegram/build/prepare/win.bat \
+            Telegram/build/qt_version.py > "$RUNNER_TEMP/libraries-cache-key.txt"
+          echo "x64-qt6" >> "$RUNNER_TEMP/libraries-cache-key.txt"
+          CACHE_KEY=$(sha256sum --zero "$RUNNER_TEMP/libraries-cache-key.txt" | awk '{ print $1 }')
+          echo "CACHE_KEY=$CACHE_KEY" >> "$GITHUB_ENV"
+
+      - name: Restore Libraries cache
+        id: libraries-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/TBuild/Libraries
+          key: ${{ runner.OS }}-x64-qt6-libs-${{ env.CACHE_KEY }}
+          restore-keys: ${{ runner.OS }}-x64-qt6-libs-
+
+      - name: Setup MSVC
+        if: steps.libraries-cache.outputs.cache-hit != 'true'
+        uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: x64
+
+      - name: Build Libraries
+        if: steps.libraries-cache.outputs.cache-hit != 'true'
+        env:
+          GYP_MSVS_OVERRIDE_PATH: 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\'
+          GYP_MSVS_VERSION: 2022
+        run: |
+          nuget sources Disable -Name "Microsoft Visual Studio Offline Packages"
+          nuget sources Add -Source https://api.nuget.org/v3/index.json
+          cd %TBUILD%
+          %REPO_NAME%\Telegram\build\prepare\win.bat silent qt6
+
+      - name: Clean temporary files
+        if: steps.libraries-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $root = [IO.Path]::GetFullPath("$env:USERPROFILE\TBuild\Libraries")
+          $gitDirectories = @(Get-ChildItem -LiteralPath $root -Recurse -Force -Directory |
+            Where-Object { $_.Name -eq '.git' })
+          $gitDirectories |
+            Sort-Object { $_.FullName.Length } -Descending |
+            Remove-Item -Recurse -Force
+          # A static Qt 6 installs resource objects that its imported
+          # targets point at, so the installed tree has to survive this.
+          $qtInstalled = Join-Path $root 'win64\Qt-'
+          Get-ChildItem -LiteralPath $root -Recurse -Force -File |
+            Where-Object {
+              ($_.FullName -notlike "$qtInstalled*") -and
+              ($_.Name -eq '.git' -or $_.Extension -in '.pdb', '.pch', '.obj', '.ilk')
+            } |
+            Remove-Item -Force
+          $win64 = Join-Path $root 'win64'
+          Get-ChildItem -LiteralPath (Join-Path $win64 'cache_keys') -Force -File |
+            Where-Object { $_.Name -like 'qt_*' } |
+            ForEach-Object {
+              $version = $_.Name.Substring(3)
+              $buildPath = Join-Path $win64 $_.Name
+              $installPath = Join-Path $win64 "Qt-$version"
+              if ((Test-Path -LiteralPath $buildPath -PathType Container) -and
+                  (Test-Path -LiteralPath $installPath -PathType Container)) {
+                Get-ChildItem -LiteralPath $buildPath -Force |
+                  Remove-Item -Recurse -Force
+                New-Item -ItemType File -Path (Join-Path $buildPath '.cache-stage') -Force |
+                  Out-Null
+              }
+            }
+          $configurationDirectories = @(Get-ChildItem -LiteralPath $root -Recurse -Force -Directory |
+            Where-Object {
+              (($_.Name -in 'Debug', 'MinSizeRel') -and
+                ((Test-Path -LiteralPath (Join-Path $_.Parent.FullName 'Release') -PathType Container) -or
+                 (Test-Path -LiteralPath (Join-Path $_.Parent.FullName 'RelWithDebInfo') -PathType Container))) -or
+              (($_.Name -eq 'builddir-debug') -and
+                (Test-Path -LiteralPath (Join-Path $_.Parent.FullName 'builddir-release') -PathType Container)) -or
+              (($_.Name -eq 'out.dbg') -and
+                (Test-Path -LiteralPath (Join-Path $_.Parent.FullName 'out') -PathType Container))
+            })
+          $configurationDirectories |
+            Sort-Object { $_.FullName.Length } -Descending |
+            Remove-Item -Recurse -Force
+
+      - name: Save Libraries cache
+        if: steps.libraries-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/TBuild/Libraries
+          key: ${{ runner.OS }}-x64-qt6-libs-${{ env.CACHE_KEY }}
+
+  build-desktop:
+    name: Build Desktop
+    needs: build-libraries
+    runs-on: windows-2022
+
+    env:
+      TBUILD: ${{ github.workspace }}\TBuild
+      REPO_NAME: ${{ github.event.repository.name }}
+      BUILD_PARALLEL_JOBS: "2"
+      TDESKTOP_BUILD_ARCH: x64
+      TDESKTOP_BUILD_API: ${{ github.ref == 'refs/heads/nightly' && '-D TDESKTOP_API_ID=611335 -D TDESKTOP_API_HASH=d524b414d21f4d37f08684c1df41ac9c' || '-D TDESKTOP_API_TEST=ON' }}
+
+    defaults:
+      run:
+        shell: cmd
+
+    steps:
+      - name: Prepare directories
+        run: |
+          mkdir %userprofile%\TBuild\Libraries
+          mklink /d %TBUILD% %userprofile%\TBuild
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: x64
+
+      - name: Clone
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          path: ${{ env.TBUILD }}\${{ env.REPO_NAME }}
+
+      - name: Restore Libraries cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/TBuild/Libraries
+          key: ${{ runner.OS }}-x64-qt6-libs-${{ needs.build-libraries.outputs.cache-key }}
+          restore-keys: ${{ runner.OS }}-x64-qt6-libs-
+          fail-on-cache-miss: true
+
+      - name: Apply lib_ui Patch
+        shell: powershell
+        run: |
+          cd "$env:TBUILD\$env:REPO_NAME"
+          $patchPath = "$env:RUNNER_TEMP\lib_ui.patch"
+          $patch = [IO.File]::ReadAllText("$env:TBUILD\$env:REPO_NAME\patches\lib_ui.patch").Replace("`r`n", "`n")
+          [IO.File]::WriteAllText($patchPath, $patch, [Text.UTF8Encoding]::new($false))
+          git -C Telegram/lib_ui apply --ignore-whitespace $patchPath
+
+      - name: Restore Desktop cache
+        id: desktop-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ env.TBUILD }}\${{ env.REPO_NAME }}\out
+            !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\Release\**
+            !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\**\*.lib
+            !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\**\*.exe
+            !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\**\*.dll
+            !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\**\*.pdb
+            !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\**\*.ilk
+            !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\**\*.exp
+          key: ${{ runner.OS }}-x64-qt6-desktop-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: ${{ runner.OS }}-x64-qt6-desktop-
+
+      - name: Restore Desktop cache timestamps
+        if: steps.desktop-cache.outputs.cache-matched-key != ''
+        shell: powershell
+        run: |
+          cd "$env:TBUILD\$env:REPO_NAME"
+          $matchedKey = '${{ steps.desktop-cache.outputs.cache-matched-key }}'
+          if ($matchedKey -notmatch '-desktop-([0-9a-f]{40})-\d+-\d+$') {
+            throw "Unexpected desktop cache key: $matchedKey"
+          }
+          $cacheCommit = $Matches[1]
+          git fetch --no-tags --depth=1 origin $cacheCommit
+          if ($LASTEXITCODE) {
+            throw "Could not fetch desktop cache commit $cacheCommit"
+          }
+          $root = (Get-Location).Path
+          $baseline = [DateTime]::new(2000, 1, 1, 0, 0, 0, [DateTimeKind]::Utc)
+          git -c core.quotepath=false ls-files --recurse-submodules | ForEach-Object {
+            $path = Join-Path $root $_
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+              [IO.File]::SetLastWriteTimeUtc($path, $baseline)
+            }
+          }
+          $changed = @(git -c core.quotepath=false diff --name-only $cacheCommit HEAD)
+          if ($LASTEXITCODE) {
+            throw "Could not compare desktop cache commit $cacheCommit"
+          }
+          $current = [DateTime]::UtcNow
+          $changed | ForEach-Object {
+            $path = Join-Path $root $_
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+              [IO.File]::SetLastWriteTimeUtc($path, $current)
+            } elseif (Test-Path -LiteralPath $path -PathType Container) {
+              git -c core.quotepath=false -C $path ls-files --recurse-submodules | ForEach-Object {
+                [IO.File]::SetLastWriteTimeUtc((Join-Path $path $_), $current)
+              }
+            }
+          }
+          if ($changed -contains 'patches/lib_ui.patch') {
+            # Touch only files whose part of the patch changed. Some patched
+            # headers (animations.h, scroll_area.h) are included almost
+            # everywhere, so touching every patched file rebuilt nearly all.
+            function Split-Patch([string]$text) {
+              $files = @{}
+              $name = $null
+              foreach ($line in (($text -replace "`r`n", "`n") -split "`n")) {
+                if ($line -match '^diff --git a/(\S+) b/') {
+                  $name = $Matches[1]
+                  $files[$name] = ''
+                }
+                if ($name) {
+                  $files[$name] += $line + "`n"
+                }
+              }
+              return $files
+            }
+            $oldText = git show "${cacheCommit}:patches/lib_ui.patch" 2>$null
+            if ($LASTEXITCODE) {
+              $oldText = @()
+              $global:LASTEXITCODE = 0
+            }
+            $old = Split-Patch ($oldText -join "`n")
+            $new = Split-Patch ([IO.File]::ReadAllText("$root\patches\lib_ui.patch"))
+            foreach ($name in (@($old.Keys) + @($new.Keys) | Sort-Object -Unique)) {
+              if ("$($old[$name])".TrimEnd() -ne "$($new[$name])".TrimEnd()) {
+                $path = Join-Path "$root\Telegram\lib_ui" $name
+                if (Test-Path -LiteralPath $path -PathType Leaf) {
+                  Write-Output "Patch changed: $name"
+                  [IO.File]::SetLastWriteTimeUtc($path, $current)
+                }
+              }
+            }
+          }
+
+      - name: Build Desktop
+        id: build
+        env:
+          GYP_MSVS_OVERRIDE_PATH: 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\'
+          GYP_MSVS_VERSION: 2022
+        run: |
+          cd %TBUILD%
+          call %REPO_NAME%\Telegram\build\prepare\win.bat silent qt6
+          cd %TBUILD%\%REPO_NAME%\Telegram
+
+          call configure.bat ^
+          %TDESKTOP_BUILD_ARCH% ^
+          qt6 ^
+          %TDESKTOP_BUILD_API% ^
+          -D CMAKE_C_FLAGS="/WX /O2 /Gw /Zc:inline /Oy /Gy /cgthreads2 /DNDEBUG" ^
+          -D CMAKE_CXX_FLAGS="/WX /O2 /Gw /Zc:inline /Oy /Gy /cgthreads2 /DNDEBUG" ^
+          -D CMAKE_EXE_LINKER_FLAGS="/OPT:REF /OPT:ICF=10 /DEBUG:NONE" ^
+          -D CMAKE_BUILD_TYPE=Release ^
+          -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON ^
+          -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON ^
+          -D DESKTOP_APP_ENABLE_LTO=OFF ^
+          -D "CMAKE_MSVC_DEBUG_INFORMATION_FORMAT="
+
+          cmake --build ..\out --config Release --target Telegram --parallel %BUILD_PARALLEL_JOBS% || ^
+          cmake --build ..\out --config Release --target Telegram --parallel 1
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Telegram_x64
+          path: ${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\Release\AyuGram.exe
+          if-no-files-found: error
+
+      - name: Save Desktop cache
+        if: ${{ !cancelled() && steps.build.outcome != 'skipped' }}
+        uses: actions/cache/save@v4
+        env:
+          ZSTD_CLEVEL: "1"
+        with:
+          path: |
+            ${{ env.TBUILD }}\${{ env.REPO_NAME }}\out
+            !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\Release\**
+            !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\**\*.lib
+            !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\**\*.exe
+            !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\**\*.dll
+            !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\**\*.pdb
+            !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\**\*.ilk
+            !${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\**\*.exp
+          key: ${{ runner.OS }}-x64-qt6-desktop-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+  prune-old-actions:
+    name: Prune Old Actions
+    needs: build-desktop
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+
+    steps:
+      - uses: yanovian/prune-old-actions@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          days-ago: 0
+          keep-latest: 5
