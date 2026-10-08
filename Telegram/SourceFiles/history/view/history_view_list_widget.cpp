@@ -107,6 +107,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include <QtCore/QMimeData>
 
 // AyuGram includes
+#include "ayu/ayu_settings.h"
 #include "ayu/features/filters/filters_cache_controller.h"
 #include "ayu/utils/telegram_helpers.h"
 
@@ -669,13 +670,16 @@ ListWidget::ListWidget(
 		}
 	}, lifetime());
 
-	rpl::merge(
-		_session->changes().peerUpdates(
-			Data::PeerUpdate::Flag::IsBlocked
-		) | rpl::to_empty,
-		FiltersCacheController::updates()
-	) | rpl::on_next([=] {
+	// Same as in HistoryWidget: blocked statuses change in bulk, mostly for
+	// people with no messages here, and each pass re-lays out every row.
+	const auto refreshQueued = std::make_shared<bool>(false);
+	const auto refreshFiltered = [=] {
+		if (*refreshQueued) {
+			return;
+		}
+		*refreshQueued = true;
 		crl::on_main(this, [=] {
+			*refreshQueued = false;
 			if (_viewsCapacity.empty()) {
 				for (const auto &view : _items) {
 					view->setPendingResize();
@@ -684,7 +688,24 @@ ListWidget::ListWidget(
 				refreshRows(old);
 			}
 		});
-	}, lifetime());
+	};
+	_session->changes().peerUpdates(
+		Data::PeerUpdate::Flag::IsBlocked
+	) | rpl::filter([=](const Data::PeerUpdate &update) {
+		const auto &settings = AyuSettings::getInstance();
+		if (!settings.filtersEnabled() || !settings.hideFromBlocked()) {
+			return false;
+		}
+		const auto peer = update.peer.get();
+		return ranges::any_of(_items, [&](not_null<Element*> view) {
+			const auto item = view->data();
+			const auto forwarded = item->Get<HistoryMessageForwarded>();
+			return (item->from().get() == peer)
+				|| (forwarded && forwarded->originalSender == peer);
+		});
+	}) | rpl::to_empty | rpl::on_next(refreshFiltered, lifetime());
+	FiltersCacheController::updates(
+	) | rpl::on_next(refreshFiltered, lifetime());
 
 	_session->downloaderTaskFinished(
 	) | rpl::on_next([=] {

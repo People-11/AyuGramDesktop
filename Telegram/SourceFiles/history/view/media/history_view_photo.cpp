@@ -211,6 +211,9 @@ void Photo::unloadHeavyPart() {
 		_spoiler->animation = nullptr;
 	}
 	_imageCache = QImage();
+	_imageCacheReady = QImage();
+	_imageCachePending = false;
+	_groupedWorker.clear();
 	togglePollingStory(false);
 }
 
@@ -593,12 +596,90 @@ void Photo::validateImageCache(
 		&& _imageCacheRounding == rounding
 		&& _imageCacheBlurred == blurredValue) {
 		return;
+	} else if (large && validateImageCacheAsync(scaled, rounding)) {
+		return;
 	}
 	_imageCache = Images::Round(
 		prepareImageCache(scaled),
 		MediaRoundingMask(rounding));
 	_imageCacheRounding = rounding;
 	_imageCacheBlurred = blurredValue;
+}
+
+// Scaling the full size photo down took 15-25ms right inside paint. Keep
+// showing what we have (or the blurred thumbnail) until a worker is done.
+bool Photo::validateImageCacheAsync(
+		QSize scaled,
+		std::optional<Ui::BubbleRounding> rounding) const {
+	const auto size = scaled * style::DevicePixelRatio();
+	if (!_imageCacheReady.isNull()) {
+		if (_imageCacheReady.size() == size
+			&& _imageCacheReadyRounding == rounding) {
+			_imageCache = base::take(_imageCacheReady);
+			_imageCacheRounding = rounding;
+			_imageCacheBlurred = 0;
+			return true;
+		}
+		_imageCacheReady = QImage();
+	}
+	// One worker at a time, a stale result just repaints and that paint
+	// starts the worker for the current size.
+	if (!_imageCachePending) {
+		_imageCachePending = true;
+
+		// The cached corner masks belong to the main thread.
+		const auto ref = MediaRoundingMask(rounding);
+		auto masks = std::array<QImage, 4>();
+		for (auto i = 0; i != 4; ++i) {
+			if (ref.p[i]) {
+				masks[i] = *ref.p[i];
+			}
+		}
+		const auto source = _dataMedia->image(PhotoSize::Large);
+		const auto background = imageCacheBlurredSource(source);
+		const auto resize = ::Media::Streaming::DecideFrameResize(
+			scaled,
+			source->size());
+		crl::async([
+			=,
+			weak = base::make_weak(this),
+			large = source->original(),
+			blurred = background ? background->original() : QImage()
+		]() mutable {
+			auto mask = Images::CornersMaskRef();
+			for (auto i = 0; i != 4; ++i) {
+				if (!masks[i].isNull()) {
+					mask.p[i] = &masks[i];
+				}
+			}
+			auto result = Images::Round(
+				PrepareWithBlurredBackground(
+					scaled,
+					resize,
+					std::move(large),
+					std::move(blurred)),
+				mask);
+			crl::on_main([=, result = std::move(result)]() mutable {
+				// We are the owner, so check it before touching members.
+				// After unloadHeavyPart() nothing is pending, drop it then.
+				if (!weak.get() || !_imageCachePending) {
+					return;
+				}
+				_imageCachePending = false;
+				_imageCacheReady = std::move(result);
+				_imageCacheReadyRounding = rounding;
+				_parent->repaint();
+			});
+		});
+	}
+	if (_imageCache.isNull()) {
+		_imageCache = Images::Round(
+			prepareImageCacheWithLarge(scaled, nullptr),
+			MediaRoundingMask(rounding));
+		_imageCacheRounding = rounding;
+		_imageCacheBlurred = 1;
+	}
+	return true;
 }
 
 void Photo::validateSpoilerImageCache(
@@ -627,21 +708,23 @@ QImage Photo::prepareImageCache(QSize outer) const {
 }
 
 QImage Photo::prepareImageCacheWithLarge(QSize outer, Image *large) const {
-	using Size = PhotoSize;
-	auto blurred = (Image*)nullptr;
-	if (const auto embedded = _dataMedia->thumbnailInline()) {
-		blurred = embedded;
-	} else if (const auto thumbnail = _dataMedia->image(Size::Thumbnail)) {
-		blurred = thumbnail;
-	} else if (const auto small = _dataMedia->image(Size::Small)) {
-		blurred = small;
-		} else {
-			blurred = large;
-	}
+	const auto blurred = imageCacheBlurredSource(large);
 	const auto resize = large
 		? ::Media::Streaming::DecideFrameResize(outer, large->size())
 		: ::Media::Streaming::ExpandDecision();
 	return PrepareWithBlurredBackground(outer, resize, large, blurred);
+}
+
+Image *Photo::imageCacheBlurredSource(Image *large) const {
+	using Size = PhotoSize;
+	if (const auto embedded = _dataMedia->thumbnailInline()) {
+		return embedded;
+	} else if (const auto thumbnail = _dataMedia->image(Size::Thumbnail)) {
+		return thumbnail;
+	} else if (const auto small = _dataMedia->image(Size::Small)) {
+		return small;
+	}
+	return large;
 }
 
 void Photo::paintUserpicFrame(
@@ -1081,6 +1164,25 @@ void Photo::validateGroupedCache(
 		: _dataMedia->thumbnailInline()
 		? _dataMedia->thumbnailInline()
 		: Image::BlankMedia().get();
+
+	// Anything but the inline thumbnail can be full size, including the
+	// smaller sizes of a progressive photo, decoded from the same bytes.
+	const auto tiny = _dataMedia->thumbnailInline();
+	if (image != tiny
+		&& image != Image::BlankMedia().get()
+		&& _groupedWorker.validate(
+			this,
+			key,
+			cacheKey,
+			cache,
+			image->original(),
+			tiny ? tiny->original() : QImage(),
+			pixSize * ratio,
+			{ width, height },
+			!loaded,
+			rounding)) {
+		return;
+	}
 
 	*cacheKey = key;
 	auto prepared = Images::Prepare(

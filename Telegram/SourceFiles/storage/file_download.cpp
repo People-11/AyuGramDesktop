@@ -169,6 +169,36 @@ QImage FileLoader::imageData() const {
 	return _imageData;
 }
 
+void FileLoader::decodeImageAndFinish() {
+	crl::async([
+		this,
+		weak = base::make_weak(this),
+		bytes = _data,
+		size = _loadSize
+	]() mutable {
+		// Same bytes readImage() would use.
+		auto read = Images::Read({
+			.content = (size && size < bytes.size())
+				? QByteArray::fromRawData(bytes.constData(), size)
+				: bytes,
+		});
+		crl::on_main(weak, [
+			this,
+			image = std::move(read.image),
+			format = std::move(read.format)
+		]() mutable {
+			if (!image.isNull()) {
+				_imageFormat = format;
+				_imageData = std::move(image);
+			}
+			// NB! fire_done() can leave us in ~FileLoader() already.
+			const auto session = _session;
+			_updates.fire_done();
+			session->notifyDownloaderTaskFinished();
+		});
+	});
+}
+
 void FileLoader::readImage() const {
 	const auto buffer = _loadSize
 		? QByteArray::fromRawData(_data.data(), _loadSize)
@@ -276,6 +306,7 @@ bool FileLoader::checkForOpen() {
 
 void FileLoader::loadLocal(const Storage::Cache::Key &key) {
 	const auto readImage = (_locationType != AudioFileLocation);
+	const auto loadSize = _loadSize;
 	auto done = [=, guard = _localLoading.make_guard()](
 			QByteArray &&value,
 			QImage &&image,
@@ -294,12 +325,28 @@ void FileLoader::loadLocal(const Storage::Cache::Key &key) {
 	};
 	_session->data().cache().get(key, [=, callback = std::move(done)](
 			QByteArray &&value) mutable {
-		if (readImage && !value.startsWith("partial:")) {
+		// A progressive photo caches its smaller sizes as a "partial:"
+		// prefix of the large one. Those skipped this and reached
+		// imageData() undecoded, which then decoded a full resolution
+		// image on the main thread: ~20ms each, all through an album.
+		const auto partial = value.startsWith("partial:");
+		const auto skip = partial ? 8 : 0;
+		if (readImage && (!partial || value.size() >= loadSize + skip)) {
+			// Same bytes readImage() would use.
+			const auto size = (partial && loadSize)
+				? loadSize
+				: (value.size() - skip);
 			crl::async([
 				value = std::move(value),
-				done = std::move(callback)
+				done = std::move(callback),
+				skip,
+				size
 			]() mutable {
-				auto read = Images::Read({ .content = value });
+				auto read = Images::Read({
+					.content = QByteArray::fromRawData(
+						value.constData() + skip,
+						size),
+				});
 				if (!read.image.isNull()) {
 					done(
 						std::move(value),
@@ -478,6 +525,16 @@ bool FileLoader::finalizeResult() {
 						: ("partial:" + _data)),
 					_cacheTag));
 		}
+	}
+	if (_imageData.isNull()
+		&& _locationType == UnknownFileLocation
+		&& !_data.isEmpty()) {
+		// Consumers read imageData() from the done handler, so decoding
+		// happens right inside the MTP response handler. loadLocal()
+		// already decodes off the main thread, do the same here and
+		// finish once the image is ready.
+		decodeImageAndFinish();
+		return true;
 	}
 	const auto session = _session;
 	_updates.fire_done();

@@ -366,6 +366,34 @@ index 3fec552..c67a86f 100644
  #ifdef DESKTOP_APP_USE_ANGLE
  		format.setRedBufferSize(8);
  		format.setGreenBufferSize(8);
+diff --git a/ui/text/custom_emoji_instance.cpp b/ui/text/custom_emoji_instance.cpp
+index 15d42ec..07afec0 100644
+--- a/ui/text/custom_emoji_instance.cpp
++++ b/ui/text/custom_emoji_instance.cpp
+@@ -550,7 +550,22 @@ void Renderer::finish() {
+ 	_finished = true;
+ 	_cache.finish();
+ 	if (_put) {
+-		_put(_cache.serialize());
++		// LZ4 over every frame of a big animated emoji takes tens of ms,
++		// so compress on a worker and only store on the main thread. The
++		// copy shares the frames, and neither side writes them any more.
++		crl::async([
++			=,
++			guard = base::make_weak(this),
++			cache = _cache
++		]() mutable {
++			auto serialized = cache.serialize();
++			crl::on_main(guard, [
++				=,
++				serialized = std::move(serialized)
++			]() mutable {
++				_put(std::move(serialized));
++			});
++		});
+ 	}
+ }
+ 
 diff --git a/ui/widgets/elastic_scroll.cpp b/ui/widgets/elastic_scroll.cpp
 index 667a233..7eb7c00 100644
 --- a/ui/widgets/elastic_scroll.cpp
