@@ -1,3 +1,273 @@
+diff --git a/ui/effects/animations.cpp b/ui/effects/animations.cpp
+index bb268d6..2f17087 100644
+--- a/ui/effects/animations.cpp
++++ b/ui/effects/animations.cpp
+@@ -12,6 +12,21 @@
+ 
+ #include <QtCore/QPointer>
+ 
++#ifdef Q_OS_WIN
++#include "base/platform/win/base_windows_safe_library.h"
++
++#include <QtGui/QGuiApplication>
++#include <QtGui/QScreen>
++
++#include <chrono>
++#include <cmath>
++#include <condition_variable>
++#include <mutex>
++#include <thread>
++
++#include <dxgi.h>
++#endif // Q_OS_WIN
++
+ #include <crl/crl_on_main.h>
+ #include <crl/crl.h>
+ #include <rpl/filter.h>
+@@ -24,13 +39,148 @@ namespace Animations {
+ namespace {
+ 
+ constexpr auto kAnimationTick = crl::time(1000) / st::universalDuration;
++#ifdef Q_OS_WIN
++// A frame's update request evaluates animations unless a tick just did,
++// so it never paints values more than a millisecond old.
++constexpr auto kIgnoreUpdatesTimeout = crl::time(1);
++#else // Q_OS_WIN
+ constexpr auto kIgnoreUpdatesTimeout = crl::time(4);
++#endif // Q_OS_WIN
+ 
+ Manager *ManagerInstance = nullptr;
+ bool ScheduleWithInvokeQueued = false;
+ 
+ } // namespace
+ 
++#ifdef Q_OS_WIN
++// Ticks wait for the display's vblank on a thread of their own. Qt's precise
++// timers fired on the 15.6ms system tick on Windows 11, even with
++// timeBeginPeriod(1) and timer resolution throttling disabled: a tick asked
++// for in 1-9ms arrived after 14-15ms, so wheel scrolling ran at 60fps.
++class VBlankTicker final {
++public:
++	explicit VBlankTicker(Fn<void()> tick);
++	~VBlankTicker();
++
++	[[nodiscard]] bool valid() const {
++		return _output != nullptr;
++	}
++	void request();
++
++private:
++	void run();
++
++	Fn<void()> _tick;
++	IDXGIOutput *_output = nullptr;
++	std::mutex _mutex;
++	std::condition_variable _condition;
++	bool _requested = false;
++	bool _stopping = false;
++	std::thread _thread;
++
++};
++
++namespace {
++
++// ponytail: the primary display paces everything, follow the window's
++// own output if a window on a second display with another rate matters.
++[[nodiscard]] IDXGIOutput *PrimaryOutput() {
++	using Create = HRESULT(WINAPI*)(REFIID, void**);
++	auto create = Create();
++	const auto dxgi = base::Platform::SafeLoadLibrary(L"dxgi.dll");
++	if (!dxgi
++		|| !base::Platform::LoadMethod(dxgi, "CreateDXGIFactory1", create)) {
++		return nullptr;
++	}
++	auto factory = (IDXGIFactory1*)nullptr;
++	if (FAILED(create(__uuidof(IDXGIFactory1), (void**)&factory))) {
++		return nullptr;
++	}
++	const auto primary = MonitorFromPoint({ 0, 0 }, MONITOR_DEFAULTTOPRIMARY);
++	auto result = (IDXGIOutput*)nullptr;
++	auto adapter = (IDXGIAdapter1*)nullptr;
++	auto output = (IDXGIOutput*)nullptr;
++	for (auto i = UINT(); !result; ++i) {
++		if (factory->EnumAdapters1(i, &adapter) != S_OK) {
++			break;
++		}
++		for (auto j = UINT(); !result; ++j) {
++			if (adapter->EnumOutputs(j, &output) != S_OK) {
++				break;
++			}
++			auto desc = DXGI_OUTPUT_DESC();
++			if (SUCCEEDED(output->GetDesc(&desc))
++				&& desc.Monitor == primary) {
++				result = output;
++			} else {
++				output->Release();
++			}
++		}
++		adapter->Release();
++	}
++	factory->Release();
++	return result;
++}
++
++} // namespace
++
++VBlankTicker::VBlankTicker(Fn<void()> tick)
++: _tick(std::move(tick))
++, _output(PrimaryOutput()) {
++	if (_output) {
++		_thread = std::thread([=] { run(); });
++	}
++}
++
++VBlankTicker::~VBlankTicker() {
++	if (_thread.joinable()) {
++		{
++			auto lock = std::unique_lock(_mutex);
++			_stopping = true;
++		}
++		_condition.notify_one();
++		_thread.join();
++	}
++	if (_output) {
++		_output->Release();
++	}
++}
++
++void VBlankTicker::request() {
++	{
++		auto lock = std::unique_lock(_mutex);
++		if (_requested) {
++			return;
++		}
++		_requested = true;
++	}
++	_condition.notify_one();
++}
++
++void VBlankTicker::run() {
++	auto lock = std::unique_lock(_mutex);
++	while (true) {
++		_condition.wait(lock, [&] { return _requested || _stopping; });
++		if (_stopping) {
++			return;
++		}
++		lock.unlock();
++		if (FAILED(_output->WaitForVBlank())) {
++			// ponytail: no vblank (display off or gone), approximate 60Hz.
++			std::this_thread::sleep_for(std::chrono::milliseconds(16));
++		}
++		lock.lock();
++		if (_stopping) {
++			return;
++		}
++		_requested = false;
++		lock.unlock();
++		_tick();
++		lock.lock();
++	}
++}
++#endif // Q_OS_WIN
++
+ void Basic::start() {
+ 	Expects(ManagerInstance != nullptr);
+ 
+@@ -184,8 +334,17 @@ void Manager::schedule() {
+ 			_forceImmediateUpdate = false;
+ 			updateQueued();
+ 		} else {
+-			const auto next = _lastUpdateTime + kAnimationTick;
++#ifdef Q_OS_WIN
++			if (requestVBlankTick()) {
++				return;
++			}
++#endif // Q_OS_WIN
+ 			const auto now = crl::now();
++#ifdef Q_OS_WIN
++			const auto next = nextTick(now);
++#else // Q_OS_WIN
++			const auto next = _lastUpdateTime + kAnimationTick;
++#endif // Q_OS_WIN
+ 			if (now < next) {
+ 				_timerId = startTimer(next - now, Qt::PreciseTimer);
+ 			} else {
+@@ -200,6 +359,43 @@ void Manager::schedule() {
+ 	}
+ }
+ 
++#ifdef Q_OS_WIN
++// Ticks keep a steady cadence at the refresh rate. Counting the period from
++// the last update let every update between ticks (the paint's own, or one
++// after a DirectManipulation callback) push the next tick back, so whatever
++// delayed the paint was added to the period and the frame rate halved.
++crl::time Manager::nextTick(crl::time now) {
++	const auto screen = QGuiApplication::primaryScreen();
++	const auto rate = screen ? screen->refreshRate() : 0.;
++	const auto period = (rate >= 30.)
++		? (1000. / rate)
++		: float64(kAnimationTick);
++	if (_nextTick <= now - period || _nextTick > now + period) {
++		_nextTick = now + period;
++	} else {
++		while (_nextTick <= now) {
++			_nextTick += period;
++		}
++	}
++	return crl::time(std::ceil(_nextTick));
++}
++
++bool Manager::requestVBlankTick() {
++	if (!_vblank) {
++		_vblank = std::make_unique<VBlankTicker>([=] {
++			InvokeQueued(delayedCallGuard(), [=] {
++				update();
++			});
++		});
++	}
++	if (!_vblank->valid()) {
++		return false;
++	}
++	_vblank->request();
++	return true;
++}
++#endif // Q_OS_WIN
++
+ not_null<const QObject*> Manager::delayedCallGuard() const {
+ 	return static_cast<const QObject*>(this);
+ }
+diff --git a/ui/effects/animations.h b/ui/effects/animations.h
+index 254bab9..a4dc326 100644
+--- a/ui/effects/animations.h
++++ b/ui/effects/animations.h
+@@ -16,6 +16,9 @@ namespace Ui {
+ namespace Animations {
+ 
+ class Manager;
++#ifdef Q_OS_WIN
++class VBlankTicker;
++#endif // Q_OS_WIN
+ 
+ class Basic final {
+ public:
+@@ -206,9 +209,17 @@ private:
+ 	void schedule();
+ 	void updateQueued();
+ 	void stopTimer();
++#ifdef Q_OS_WIN
++	[[nodiscard]] crl::time nextTick(crl::time now);
++	[[nodiscard]] bool requestVBlankTick();
++#endif // Q_OS_WIN
+ 	not_null<const QObject*> delayedCallGuard() const;
+ 
+ 	crl::time _lastUpdateTime = 0;
++#ifdef Q_OS_WIN
++	float64 _nextTick = 0.;
++	std::unique_ptr<VBlankTicker> _vblank;
++#endif // Q_OS_WIN
+ 	int _timerId = 0;
+ 	bool _updating = false;
+ 	bool _removedWhileUpdating = false;
 diff --git a/ui/gl/gl_detection.cpp b/ui/gl/gl_detection.cpp
 index 24d330d..1a9becd 100644
 --- a/ui/gl/gl_detection.cpp
@@ -13,3 +283,340 @@ index 24d330d..1a9becd 100644
  	},
  	.restartRequired = true,
  });
+diff --git a/ui/platform/win/ui_windows_direct_manipulation.cpp b/ui/platform/win/ui_windows_direct_manipulation.cpp
+index f00f9ef..3520f47 100644
+--- a/ui/platform/win/ui_windows_direct_manipulation.cpp
++++ b/ui/platform/win/ui_windows_direct_manipulation.cpp
+@@ -578,6 +578,14 @@ void ActivateDirectManipulation(not_null<RpWidget*> window) {
+ 			const auto scale = dpi ? (96. / dpi) : 1.;
+ 			const auto delta = QPointF(event.delta) * scale;
+ 			const auto inverted = true;
++
++			// Deliver right away. This runs from the animation tick just
++			// before a frame is painted, and a queued event lands on that
++			// frame or the next one depending on what drove the tick, so
++			// the inertia moved 0, 1 or 2 steps between frames.
++			const auto synchronous
++				= QWindowSystemInterfacePrivate::synchronousWindowSystemEvents;
++			QWindowSystemInterface::setSynchronousWindowSystemEvents(true);
+ 			QWindowSystemInterface::handleWheelEvent(
+ 				windowHandle,
+ 				QWindowSystemInterfacePrivate::eventTime.elapsed(),
+@@ -592,6 +600,8 @@ void ActivateDirectManipulation(not_null<RpWidget*> window) {
+ 				phase,
+ 				Qt::MouseEventSynthesizedBySystem,
+ 				inverted);
++			QWindowSystemInterface::setSynchronousWindowSystemEvents(
++				synchronous);
+ 		};
+ 		switch (event.type) {
+ 		case Type::ScrollStart: send(Qt::ScrollBegin); break;
+diff --git a/ui/rp_widget.cpp b/ui/rp_widget.cpp
+index 3fec552..c67a86f 100644
+--- a/ui/rp_widget.cpp
++++ b/ui/rp_widget.cpp
+@@ -357,7 +357,12 @@ RpWidget::RpWidget(QWidget *parent)
+ : RpWidgetBase<QWidget>(parent) {
+ 	[[maybe_unused]] static const auto Once = [] {
+ 		auto format = QSurfaceFormat::defaultFormat();
++#ifdef Q_OS_WIN
++		// The RHI swap chain is what paces presentation now.
++		format.setSwapInterval(1);
++#else // Q_OS_WIN
+ 		format.setSwapInterval(::Platform::MetalSupported() ? 1 : 0);
++#endif // Q_OS_WIN
+ #ifdef DESKTOP_APP_USE_ANGLE
+ 		format.setRedBufferSize(8);
+ 		format.setGreenBufferSize(8);
+diff --git a/ui/widgets/elastic_scroll.cpp b/ui/widgets/elastic_scroll.cpp
+index 667a233..7eb7c00 100644
+--- a/ui/widgets/elastic_scroll.cpp
++++ b/ui/widgets/elastic_scroll.cpp
+@@ -418,9 +418,16 @@ ElasticScroll::ElasticScroll(
+ , _position(Position{ 0, 0 })
+ , _movement(Movement::None) {
+ 	setAttribute(Qt::WA_AcceptTouchEvents);
++	_wheelScroll = std::make_unique<DiscreteScrollAnimation>(
++		DiscreteScrollAnimation::Callbacks{
++			.position = [=] { return _state.visibleFrom; },
++			.apply = [=](int value) { applyScrollTo(value); },
++			.clamp = [=](int value) { return willScrollTo(value); },
++		});
+ 
+ 	_bar->visibleFromDragged(
+ 	) | rpl::on_next([=](int from) {
++		_wheelScroll->stop();
+ 		tryScrollTo(from, false);
+ 	}, _bar->lifetime());
+ }
+@@ -884,6 +891,7 @@ void ElasticScroll::paintEvent(QPaintEvent *e) {
+ bool ElasticScroll::handleWheelEvent(not_null<QWheelEvent*> e, bool touch) {
+ 	if (_customWheelProcess
+ 		&& _customWheelProcess(static_cast<QWheelEvent*>(e.get()))) {
++		_wheelScroll->stop();
+ 		return true;
+ 	}
+ 	const auto phase = e->phase();
+@@ -945,6 +953,9 @@ bool ElasticScroll::handleWheelEvent(not_null<QWheelEvent*> e, bool touch) {
+ 		ignore = true;
+ 		delta = 0;
+ 	}
++	if (phase != Qt::NoScrollPhase) {
++		_wheelScroll->stop();
++	}
+ 	if (phase == Qt::NoScrollPhase) {
+ 		if (_overscroll == currentOverscrollDefault()) {
+ 			const auto weak = base::make_weak(this);
+@@ -952,10 +963,25 @@ bool ElasticScroll::handleWheelEvent(not_null<QWheelEvent*> e, bool touch) {
+ 			if (!weak) {
+ 				return true;
+ 			}
+-			tryScrollTo(_state.visibleFrom + delta);
++			const auto angle = _vertical
++				? e->angleDelta().y()
++				: e->angleDelta().x();
++			// Any phaseless wheel, a high resolution one too: applying its
++			// events as they come ties the motion to the mouse polling.
++			if (!touch && e->pixelDelta().isNull() && angle) {
++				_wheelScroll->handle((std::abs(angle) == 120)
++					? (delta * 2)
++					: delta);
++			} else {
++				_wheelScroll->stop();
++				tryScrollTo(_state.visibleFrom + delta);
++			}
+ 			_movement = Movement::None;
+-		} else if (!_overscrollReturnAnimation.animating()) {
+-			overscrollReturn();
++		} else {
++			_wheelScroll->stop();
++			if (!_overscrollReturnAnimation.animating()) {
++				overscrollReturn();
++			}
+ 		}
+ 		return true;
+ 	}
+@@ -1211,6 +1237,7 @@ bool ElasticScroll::filterOutTouchEvent(QEvent *e) {
+ }
+ 
+ void ElasticScroll::handleTouchEvent(QTouchEvent *e) {
++	_wheelScroll->stop();
+ 	if (!e->touchPoints().isEmpty()) {
+ 		_touchPreviousPosition = _touchPosition;
+ 		_touchPosition = e->touchPoints().cbegin()->screenPos().toPoint();
+diff --git a/ui/widgets/elastic_scroll.h b/ui/widgets/elastic_scroll.h
+index 7909e16..dcf96ef 100644
+--- a/ui/widgets/elastic_scroll.h
++++ b/ui/widgets/elastic_scroll.h
+@@ -325,6 +325,8 @@ private:
+ 	int _contentBottomInset = 0;
+ 	ScrollState _state;
+ 
++	std::unique_ptr<DiscreteScrollAnimation> _wheelScroll;
++
+ 	base::Timer _touchTimer;
+ 	base::Timer _touchScrollTimer;
+ 	QPoint _touchStart;
+diff --git a/ui/widgets/scroll_area.cpp b/ui/widgets/scroll_area.cpp
+index bf4af8e..683c4ea 100644
+--- a/ui/widgets/scroll_area.cpp
++++ b/ui/widgets/scroll_area.cpp
+@@ -17,9 +17,15 @@
+ #include <QtGui/QScreen>
+ #include <QtGui/QWindow>
+ 
++#include <cmath>
++
+ namespace Ui {
+ namespace {
+ 
++// Critically damped: from rest a notch peaks in speed after 1 / omega ms
++// and settles within about 7 / omega ms, without overshooting.
++constexpr auto kDiscreteScrollOmega = 0.03; // per ms
++
+ [[nodiscard]] int ComputeScrollTo(
+ 		int toFrom,
+ 		int toTill,
+@@ -59,6 +65,75 @@ namespace {
+ 
+ } // namespace
+ 
++DiscreteScrollAnimation::DiscreteScrollAnimation(Callbacks callbacks)
++: _callbacks(std::move(callbacks))
++, _animation([=](crl::time now) { return step(now); }) {
++}
++
++// A notch only moves the target, and a spring follows it every frame.
++// Restarting an ease on each notch instead resets the speed to its peak,
++// so a spinning wheel scrolls in a sawtooth at the notch rate.
++bool DiscreteScrollAnimation::handle(int delta) {
++	if (!delta) {
++		return true;
++	}
++	const auto current = _callbacks.position();
++	if (_animation.animating() && current != _lastApplied) {
++		stop();
++	}
++	if (!_animation.animating()) {
++		_position = current;
++		_velocity = 0.;
++		_target = current;
++		_lastApplied = current;
++		_lastTime = crl::now();
++	}
++	const auto remaining = _target - current;
++	const auto sameDirection = remaining
++		&& ((remaining > 0) == (delta > 0));
++	_target = _callbacks.clamp((sameDirection ? _target : current) + delta);
++	if (!_animation.animating() && _target != current) {
++		_animation.start();
++	}
++	return true;
++}
++
++bool DiscreteScrollAnimation::step(crl::time now) {
++	if (_callbacks.position() != _lastApplied) {
++		stop();
++		return false;
++	}
++	const auto dt = float64(std::max(now - _lastTime, crl::time(0)));
++	_lastTime = now;
++
++	// Closed form, so it stays exact however long a frame took.
++	const auto w = kDiscreteScrollOmega;
++	const auto offset = _position - _target;
++	const auto c = _velocity + w * offset;
++	const auto decay = std::exp(-w * dt);
++	const auto left = (offset + c * dt) * decay;
++	_velocity = (_velocity - w * c * dt) * decay;
++	_position = _target + left;
++
++	const auto finished = (std::abs(left) < 0.5)
++		&& (std::abs(_velocity) < 0.01);
++	const auto value = _callbacks.clamp(finished
++		? _target
++		: int(base::SafeRound(_position)));
++	_lastApplied = value;
++	_callbacks.apply(value);
++	if (finished) {
++		_lastApplied = -1;
++	}
++	return !finished;
++}
++
++void DiscreteScrollAnimation::stop() {
++	_animation.stop();
++	_velocity = 0.;
++	_lastApplied = -1;
++}
++
+ // flick scroll taken from http://qt-project.org/doc/qt-4.8/demos-embedded-anomaly-src-flickcharm-cpp.html
+ 
+ ScrollShadow::ScrollShadow(ScrollArea *parent, const style::ScrollArea *st)
+@@ -444,6 +519,20 @@ ScrollArea::ScrollArea(
+ 		_touchTimer.setCallback([=] { _touchRightButton = true; });
+ 		_touchScrollTimer.setCallback([=] { touchScrollTimer(); });
+ 	}
++
++	_wheelScroll = std::make_unique<DiscreteScrollAnimation>(
++		DiscreteScrollAnimation::Callbacks{
++			.position = [=] { return verticalScrollBar()->value(); },
++			.apply = [=](int value) {
++				verticalScrollBar()->setValue(value);
++			},
++			.clamp = [=](int value) {
++				return std::clamp(
++					value,
++					verticalScrollBar()->minimum(),
++					verticalScrollBar()->maximum());
++			},
++		});
+ }
+ 
+ void ScrollArea::touchDeaccelerate(int32 elapsed) {
+@@ -624,6 +713,7 @@ bool ScrollArea::viewportEvent(QEvent *e) {
+ 	} else if (e->type() == QEvent::Wheel) {
+ 		const auto ev = static_cast<QWheelEvent*>(e);
+ 		if (_customWheelProcess && _customWheelProcess(ev)) {
++			_wheelScroll->stop();
+ 			return true;
+ 		}
+ 		if (_wheelDirectionLocked || _crossAxisWheelProcess) {
+@@ -649,6 +739,13 @@ bool ScrollArea::viewportEvent(QEvent *e) {
+ 						phase);
+ 			}
+ 		}
++		const auto angle = ev->angleDelta().y();
++		if (ev->phase() == Qt::NoScrollPhase
++			&& ev->pixelDelta().isNull()
++			&& std::abs(angle) == 120) {
++			return _wheelScroll->handle(-ScrollDelta(ev).y() * 2);
++		}
++		_wheelScroll->stop();
+ 	}
+ 	return QScrollArea::viewportEvent(e);
+ }
+@@ -673,6 +770,7 @@ bool ScrollArea::filterOutTouchEvent(QEvent *e) {
+ }
+ 
+ void ScrollArea::touchEvent(QTouchEvent *e) {
++	_wheelScroll->stop();
+ 	if (!e->touchPoints().isEmpty()) {
+ 		_touchPrevPos = _touchPos;
+ 		_touchPos = e->touchPoints().cbegin()->screenPos().toPoint();
+@@ -960,6 +1058,9 @@ bool ScrollArea::focusNextPrevChild(bool next) {
+ }
+ 
+ void ScrollArea::setMovingByScrollBar(bool movingByScrollBar) {
++	if (movingByScrollBar) {
++		_wheelScroll->stop();
++	}
+ 	_movingByScrollBar = movingByScrollBar;
+ }
+ 
+diff --git a/ui/widgets/scroll_area.h b/ui/widgets/scroll_area.h
+index a05ab78..6025e19 100644
+--- a/ui/widgets/scroll_area.h
++++ b/ui/widgets/scroll_area.h
+@@ -46,6 +46,32 @@ struct ScrollToRequest {
+ 
+ };
+ 
++class DiscreteScrollAnimation final {
++public:
++	struct Callbacks {
++		Fn<int()> position;
++		Fn<void(int)> apply;
++		Fn<int(int)> clamp;
++	};
++
++	explicit DiscreteScrollAnimation(Callbacks callbacks);
++
++	// The delta is in pixels, already scaled to the wanted distance.
++	bool handle(int delta);
++	void stop();
++
++private:
++	bool step(crl::time now);
++
++	Callbacks _callbacks;
++	Animations::Basic _animation;
++	float64 _position = 0.;
++	float64 _velocity = 0.; // pixels per ms
++	int _target = 0;
++	int _lastApplied = -1;
++	crl::time _lastTime = 0;
++};
++
+ class ScrollShadow final : public QWidget {
+ public:
+ 	enum class Type {
+@@ -246,6 +272,8 @@ private:
+ 	object_ptr<ScrollShadow> _topShadow, _bottomShadow;
+ 	int _horizontalValue, _verticalValue;
+ 
++	std::unique_ptr<DiscreteScrollAnimation> _wheelScroll;
++
+ 	bool _touchEnabled = false;
+ 	base::Timer _touchTimer;
+ 	bool _touchScroll = false;

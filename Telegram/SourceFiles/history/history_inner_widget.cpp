@@ -1491,6 +1491,14 @@ void HistoryInner::paintEvent(QPaintEvent *e) {
 	Painter p(this);
 	auto clip = e->rect();
 
+	// e->rect() is the region's bounding rect and can span far more than
+	// needs drawing. processPainted() still runs for every item, it
+	// drives read receipts.
+	const auto region = e->region();
+	const auto needsDraw = [&](int top, int height) {
+		return region.intersects(QRect(0, top, width(), height));
+	};
+
 	auto context = preparePaintContext(clip);
 	context.gestureHorizontal = _gestureHorizontal;
 	context.highlightPathCache = &_highlightPathCache;
@@ -1692,7 +1700,9 @@ void HistoryInner::paintEvent(QPaintEvent *e) {
 			context.fullMessageSelected = selection.fullMessageSelected;
 			context.messageSelection = selection.messageSelection;
 			context.highlight = _widget->itemHighlight(view->data());
-			view->draw(p, context);
+			if (needsDraw(top, height)) {
+				view->draw(p, context);
+			}
 			processPainted(view, top, height);
 
 			top += height;
@@ -1761,7 +1771,9 @@ void HistoryInner::paintEvent(QPaintEvent *e) {
 				context.fullMessageSelected = selection.fullMessageSelected;
 				context.messageSelection = selection.messageSelection;
 				context.highlight = _widget->itemHighlight(item);
-				view->draw(p, context);
+				if (needsDraw(top, height)) {
+					view->draw(p, context);
+				}
 				processPainted(view, top, height);
 			}
 			top += height;

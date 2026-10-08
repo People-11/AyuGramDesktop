@@ -35,6 +35,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "platform/mac/global_menu_mac.h"
 #endif // Q_OS_MAC
 
+#ifdef Q_OS_WIN
+#include <timeapi.h>
+#endif // Q_OS_WIN
+
 #include <QtCore/QLockFile>
 #include <QtGui/QSessionManager>
 #include <QtGui/QScreen>
@@ -117,6 +121,13 @@ Sandbox::Sandbox(int &argc, char **argv)
 #ifdef Q_OS_MAC
 	Platform::CreateGlobalMenu();
 #endif // Q_OS_MAC
+#ifdef Q_OS_WIN
+	// Otherwise timer granularity stays at ~15.6ms and the 8ms animation
+	// tick only fires every second 120Hz vblank.
+	// ponytail: process wide, follow Ui::Animations activity if idle
+	// power draw turns out to matter.
+	timeBeginPeriod(1);
+#endif // Q_OS_WIN
 }
 
 int Sandbox::start() {
@@ -383,6 +394,9 @@ Sandbox::~Sandbox() {
 #ifdef Q_OS_MAC
 	Platform::DestroyGlobalMenu();
 #endif // Q_OS_MAC
+#ifdef Q_OS_WIN
+	timeEndPeriod(1);
+#endif // Q_OS_WIN
 }
 
 bool Sandbox::event(QEvent *e) {
