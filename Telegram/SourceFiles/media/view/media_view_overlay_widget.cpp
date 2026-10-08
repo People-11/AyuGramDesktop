@@ -669,8 +669,18 @@ OverlayWidget::PipWrap::PipWrap(
 	std::move(destroy)) {
 }
 
+// On Windows a translucent QRhi window gets per-pixel alpha only through
+// DirectComposition, over a redirection surface that shows through as DWM
+// glass, and with QRhi enabled the OpenGL probe reports nothing, leaving
+// only the CPU renderer. The background is nearly opaque anyway.
+[[nodiscard]] std::unique_ptr<Ui::GL::Window> CreateOverlayWindow() {
+	return ::Platform::IsWindows()
+		? std::make_unique<Ui::GL::Window>()
+		: std::make_unique<Ui::GL::Window>(Ui::GL::Window::Translucent::Yes);
+}
+
 OverlayWidget::OverlayWidget()
-: _wrap(std::make_unique<Ui::GL::Window>(Ui::GL::Window::Translucent::Yes))
+: _wrap(CreateOverlayWindow())
 , _window(_wrap->window())
 , _helper(Platform::CreateOverlayWidgetHelper(_window.get(), [=](bool maximized) {
 	toggleFullScreen(maximized);
@@ -1073,7 +1083,9 @@ void OverlayWidget::setupWindow() {
 	});
 
 	_window->setAttribute(Qt::WA_NoSystemBackground, true);
-	_window->setAttribute(Qt::WA_TranslucentBackground, true);
+	if (!::Platform::IsWindows()) {
+		_window->setAttribute(Qt::WA_TranslucentBackground, true);
+	}
 
 	_window->setMinimumSize(
 		{ st::mediaviewMinWidth, st::mediaviewMinHeight });

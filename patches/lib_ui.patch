@@ -283,6 +283,44 @@ index 24d330d..1a9becd 100644
  	},
  	.restartRequired = true,
  });
+diff --git a/ui/platform/win/ui_window_win.cpp b/ui/platform/win/ui_window_win.cpp
+index f34c1df..42b721e 100644
+--- a/ui/platform/win/ui_window_win.cpp
++++ b/ui/platform/win/ui_window_win.cpp
+@@ -29,6 +29,9 @@
+ #include <QtWidgets/QApplication>
+ #include <qpa/qplatformnativeinterface.h>
+ #include <qpa/qwindowsysteminterface.h>
++#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
++#include <qpa/qplatformwindow_p.h>
++#endif // Qt >= 6.0.0
+ 
+ #include <dwmapi.h>
+ #include <shellapi.h>
+@@ -919,12 +922,23 @@ void WindowHelper::updateMargins() {
+ 			_marginsDelta = QMargins();
+ 		}
+ 	}
++#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
++	// Qt 6 ignores the "WindowsCustomMargins" property. Without these Qt
++	// assumes the native frame that WM_NCCALCSIZE removed, so it places
++	// the window a title bar off and misjudges when it is fullscreen.
++	using namespace QNativeInterface::Private;
++	const auto qwindow = window()->windowHandle();
++	if (const auto native = qwindow->nativeInterface<QWindowsWindow>()) {
++		native->setCustomMargins(margins);
++	}
++#else // Qt >= 6.0.0
+ 	if (const auto native = QGuiApplication::platformNativeInterface()) {
+ 		native->setWindowProperty(
+ 			window()->windowHandle()->handle(),
+ 			"WindowsCustomMargins",
+ 			QVariant::fromValue<QMargins>(margins));
+ 	}
++#endif // Qt < 6.0.0
+ }
+ 
+ void WindowHelper::fixMaximizedWindow() {
 diff --git a/ui/platform/win/ui_windows_direct_manipulation.cpp b/ui/platform/win/ui_windows_direct_manipulation.cpp
 index f00f9ef..3520f47 100644
 --- a/ui/platform/win/ui_windows_direct_manipulation.cpp
@@ -417,6 +455,22 @@ index 7909e16..dcf96ef 100644
  	base::Timer _touchTimer;
  	base::Timer _touchScrollTimer;
  	QPoint _touchStart;
+diff --git a/ui/widgets/rp_window.cpp b/ui/widgets/rp_window.cpp
+index 9946cde..798841d 100644
+--- a/ui/widgets/rp_window.cpp
++++ b/ui/widgets/rp_window.cpp
+@@ -29,8 +29,10 @@ RpWindow::RpWindow(bool translucent, QWidget *parent)
+ 	if (translucent) {
+ 		setAttribute(Qt::WA_NoSystemBackground, true);
+ 		setAttribute(Qt::WA_TranslucentBackground, true);
++	} else {
++		// An RHI backing store has no per-pixel window alpha on Windows.
++		GL::EnsureWindowRhi(this);
+ 	}
+-	GL::EnsureWindowRhi(this);
+ 	return Platform::CreateWindowHelper(this);
+ }()) {
+ 	Expects(_helper != nullptr);
 diff --git a/ui/widgets/scroll_area.cpp b/ui/widgets/scroll_area.cpp
 index bf4af8e..683c4ea 100644
 --- a/ui/widgets/scroll_area.cpp
