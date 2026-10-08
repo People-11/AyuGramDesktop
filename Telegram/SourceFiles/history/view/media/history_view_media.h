@@ -471,4 +471,35 @@ protected:
 [[nodiscard]] Images::CornersMaskRef MediaRoundingMask(
 	std::optional<Ui::BubbleRounding> rounding);
 
+// Scales and rounds a grouped media tile off the main thread. The source can
+// be full size (an HD photo, a progressive one, a video's first frame), and
+// an album brings several into view at once, so doing it in paint stalls.
+class GroupedCacheWorker final {
+public:
+	// Puts the finished tile for key into cache, or starts a worker for it
+	// and leaves cache as is (or a blurred tiny placeholder if it is empty)
+	// until the worker is done. Returns false only when there is nothing to
+	// show meanwhile, so the caller should prepare the tile right away.
+	[[nodiscard]] bool validate(
+		not_null<const Media*> owner,
+		uint64 key,
+		not_null<uint64*> cacheKey,
+		not_null<QPixmap*> cache,
+		QImage source,
+		QImage tiny,
+		QSize size,
+		QSize outer,
+		bool blurred,
+		Ui::BubbleRounding rounding);
+
+	// Drops a finished tile and ignores a worker that is still running.
+	void clear();
+
+private:
+	QImage _ready;
+	uint64 _readyKey = 0;
+	uint64 _pendingKey = 0;
+
+};
+
 } // namespace HistoryView

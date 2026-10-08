@@ -803,43 +803,83 @@ HistoryWidget::HistoryWidget(
 		item->mainView()->itemDataChanged();
 	}, lifetime());
 
-	rpl::merge(
-		session().changes().peerUpdates(
-			Data::PeerUpdate::Flag::IsBlocked
-		) | rpl::to_empty,
-		FiltersCacheController::updates()
-	) | rpl::on_next(
-		[=]
-		{
-			crl::on_main(
-				this,
-				[=]
-				{
-					if (_history) {
-						_history->forceFullResize();
-						if (_migrated) {
-							_migrated->forceFullResize();
-						}
-						updateHistoryGeometry();
-						update();
+	// Re-laying out the whole history costs tens of ms with many messages
+	// loaded, and blocked statuses change in bulk: the whole blocked list
+	// at start, and a status becoming known whenever full user info loads.
+	// Mostly for people with nothing here, so check that first, and fold
+	// a burst into a single pass.
+	const auto refreshQueued = std::make_shared<bool>(false);
+	const auto refreshFiltered = [=] {
+		if (*refreshQueued) {
+			return;
+		}
+		*refreshQueued = true;
+		crl::on_main(
+			this,
+			[=]
+			{
+				*refreshQueued = false;
+				if (_history) {
+					_history->forceFullResize();
+					if (_migrated) {
+						_migrated->forceFullResize();
+					}
+					updateHistoryGeometry();
+					update();
 
-						for (const auto &item : _history->blocks) {
-							if (!item) {
+					for (const auto &item : _history->blocks) {
+						if (!item) {
+							continue;
+						}
+						for (const auto &msg : item->messages) {
+							if (!msg) {
 								continue;
 							}
-							for (const auto &msg : item->messages) {
-								if (!msg) {
-									continue;
-								}
 
-								_history->owner().requestViewResize(msg.get());
-								_history->owner().requestItemViewRefresh(msg->data());
-							}
+							_history->owner().requestViewResize(msg.get());
+							_history->owner().requestItemViewRefresh(msg->data());
 						}
 					}
-				});
-		},
-		lifetime());
+				}
+			});
+	};
+	const auto hasMessagesFrom = [=](not_null<PeerData*> peer) {
+		const auto &settings = AyuSettings::getInstance();
+		if (!_history
+			|| !settings.filtersEnabled()
+			|| !settings.hideFromBlocked()) {
+			return false;
+		}
+		const auto check = [&](not_null<History*> history) {
+			for (const auto &block : history->blocks) {
+				if (!block) {
+					continue;
+				}
+				for (const auto &view : block->messages) {
+					if (!view) {
+						continue;
+					}
+					const auto item = view->data();
+					if (item->from() == peer) {
+						return true;
+					}
+					const auto forwarded = item->Get<HistoryMessageForwarded>();
+					if (forwarded && forwarded->originalSender == peer.get()) {
+						return true;
+					}
+				}
+			}
+			return false;
+		};
+		return check(_history) || (_migrated && check(_migrated));
+	};
+	session().changes().peerUpdates(
+		Data::PeerUpdate::Flag::IsBlocked
+	) | rpl::filter([=](const Data::PeerUpdate &update) {
+		return hasMessagesFrom(update.peer);
+	}) | rpl::to_empty | rpl::on_next(refreshFiltered, lifetime());
+	FiltersCacheController::updates(
+	) | rpl::on_next(refreshFiltered, lifetime());
 
 	Core::App().settings().largeEmojiChanges(
 	) | rpl::on_next([=] {

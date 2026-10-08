@@ -131,6 +131,9 @@ private:
 	void validateImageCache(
 		QSize outer,
 		std::optional<Ui::BubbleRounding> rounding) const;
+	bool validateImageCacheAsync(
+		QSize scaled,
+		std::optional<Ui::BubbleRounding> rounding) const;
 	void validateUserpicImageCache(QSize size, bool forum) const;
 	[[nodiscard]] QImage prepareImageCache(QSize outer) const;
 	void validateSpoilerImageCache(
@@ -139,6 +142,7 @@ private:
 	[[nodiscard]] QImage prepareImageCacheWithLarge(
 		QSize outer,
 		Image *large) const;
+	[[nodiscard]] Image *imageCacheBlurredSource(Image *large) const;
 
 	bool videoAutoplayEnabled() const;
 	void setStreamed(std::unique_ptr<Streamed> value);
@@ -166,6 +170,10 @@ private:
 	mutable std::unique_ptr<MediaSpoilerTag> _spoilerTag;
 	mutable QImage _imageCache;
 	mutable std::optional<Ui::BubbleRounding> _imageCacheRounding;
+	mutable GroupedCacheWorker _groupedWorker;
+	mutable QImage _imageCacheReady;
+	mutable std::optional<Ui::BubbleRounding> _imageCacheReadyRounding;
+	mutable bool _imageCachePending = false;
 	uint32 _serviceWidth : 25 = 0;
 	uint32 _purchasedPriceTag : 1 = 0;
 	const uint32 _sensitiveSpoiler : 1 = 0;

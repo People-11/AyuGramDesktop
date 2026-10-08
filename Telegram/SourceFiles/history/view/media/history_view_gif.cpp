@@ -2260,6 +2260,26 @@ void Gif::validateGroupedCache(
 		{ width, height });
 	const auto ratio = style::DevicePixelRatio();
 
+	// The good thumbnail is the video's first frame at full resolution.
+	const auto tiny = _videoCoverMedia
+		? _videoCoverMedia->thumbnailInline()
+		: _dataMedia->thumbnailInline();
+	if (image
+		&& image != tiny
+		&& _groupedWorker.validate(
+			this,
+			key,
+			cacheKey,
+			cache,
+			image->original(),
+			tiny ? tiny->original() : QImage(),
+			pixSize * ratio,
+			{ width, height },
+			blur,
+			rounding)) {
+		return;
+	}
+
 	*cacheKey = key;
 	auto prepared = Images::Prepare(
 		(image ? image : Image::BlankMedia().get())->original(),
@@ -2366,6 +2386,7 @@ void Gif::unloadHeavyPart() {
 		_spoiler->animation = nullptr;
 	}
 	_thumbCache = QImage();
+	_groupedWorker.clear();
 	_seekLastFrame = QImage();
 	if (_roundSeek) {
 		_roundSeek->unloadHeavyPart();
