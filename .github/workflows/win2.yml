@@ -316,12 +316,12 @@ jobs:
           %TDESKTOP_BUILD_API% ^
           -D CMAKE_C_FLAGS="/WX /O2 /Gw /Zc:inline /Oy /Gy /cgthreads2 /DNDEBUG" ^
           -D CMAKE_CXX_FLAGS="/WX /O2 /Gw /Zc:inline /Oy /Gy /cgthreads2 /DNDEBUG" ^
-          -D CMAKE_EXE_LINKER_FLAGS="/OPT:REF /OPT:ICF=10 /DEBUG:NONE" ^
+          -D CMAKE_EXE_LINKER_FLAGS="/OPT:REF /OPT:ICF=10" ^
           -D CMAKE_BUILD_TYPE=Release ^
           -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON ^
           -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON ^
           -D DESKTOP_APP_ENABLE_LTO=OFF ^
-          -D "CMAKE_MSVC_DEBUG_INFORMATION_FORMAT="
+          -D CMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded
 
           cmake --build ..\out --config Release --target Telegram --parallel %BUILD_PARALLEL_JOBS% || ^
           cmake --build ..\out --config Release --target Telegram --parallel 1
@@ -331,6 +331,13 @@ jobs:
         with:
           name: Telegram_x64
           path: ${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\Release\AyuGram.exe
+          if-no-files-found: error
+
+      - name: Upload symbols
+        uses: actions/upload-artifact@v4
+        with:
+          name: Telegram_x64_pdb
+          path: ${{ env.TBUILD }}\${{ env.REPO_NAME }}\out\Release\AyuGram.pdb
           if-no-files-found: error
 
       - name: Save Desktop cache
